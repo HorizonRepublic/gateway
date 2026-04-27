@@ -21,3 +21,12 @@ export type {
   RateLimitKey,
   RateLimitStore,
 } from './gateway-rate-limit-config.interface';
+
+export type { IGatewayHttpMeta } from './gateway-http-meta.interface';
+
+export type {
+  GatewayRouteAuth,
+  IGatewayRouteAuthOptions,
+} from './gateway-route-auth-options.interface';
+
+export type { IGatewayRouteOptions } from './gateway-route-options.interface';
