@@ -1,0 +1,32 @@
+{
+  "compileOnSave": false,
+  "compilerOptions": {
+    "rootDir": ".",
+    "sourceMap": true,
+    "declaration": true,
+    "moduleResolution": "node",
+    "emitDecoratorMetadata": true,
+    "experimentalDecorators": true,
+    "importHelpers": true,
+    "target": "ES2024",
+    "module": "ES2022",
+    "lib": ["ES2024"],
+    "skipLibCheck": true,
+    "baseUrl": ".",
+    "useDefineForClassFields": true,
+    "paths": {
+      "@horizon-republic/gateway-sdk": ["libs/gateway-sdk/src/index.ts"]
+    },
+    "noImplicitAny": true,
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noPropertyAccessFromIndexSignature": true,
+    "exactOptionalPropertyTypes": true,
+    "plugins": [
+      {
+        "transform": "typia/lib/transform"
+      }
+    ]
+  },
+  "exclude": ["node_modules", "tmp", "dist", "coverage", ".nx", ".husky", "*.spec.ts"]
+}
