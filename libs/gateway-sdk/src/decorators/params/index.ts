@@ -16,4 +16,6 @@ export { GatewayQuery } from './gateway-query.decorator';
 
 export { GatewayRequestId } from './gateway-request-id.decorator';
 
+export { GatewayResponse } from './gateway-response.decorator';
+
 export { GatewayUser } from './gateway-user.decorator';
