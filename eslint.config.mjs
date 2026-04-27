@@ -397,7 +397,15 @@ export default [
       '@nx/dependency-checks': [
         'error',
         {
-          ignoredDependencies: ['typia', '@horizon-republic/*'],
+          ignoredDependencies: [
+            'typia',
+            '@horizon-republic/*',
+            '@jest/globals',
+            '@types/jest',
+            '@types/node',
+            'jest',
+            'ts-jest',
+          ],
           buildTargets: ['build'],
           checkMissingDependencies: true,
           checkObsoleteDependencies: true,

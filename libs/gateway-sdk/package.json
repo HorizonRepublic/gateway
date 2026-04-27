@@ -1,0 +1,37 @@
+{
+  "name": "@horizon-republic/gateway-sdk",
+  "version": "0.0.0",
+  "description": "NestJS / Fastify SDK for Horizon Gateway — declares routes, ships the exception filter and interceptor, mirrors the gateway-server's wire contracts.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/HorizonRepublic/gateway.git",
+    "directory": "libs/gateway-sdk"
+  },
+  "homepage": "https://github.com/HorizonRepublic/gateway/blob/main/libs/gateway-sdk/README.md",
+  "bugs": {
+    "url": "https://github.com/HorizonRepublic/gateway/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "nestjs",
+    "fastify",
+    "typescript",
+    "gateway",
+    "http",
+    "nats",
+    "microservice"
+  ],
+  "author": {
+    "name": "Horizon Republic",
+    "url": "https://github.com/HorizonRepublic"
+  },
+  "license": "MIT",
+  "type": "commonjs",
+  "main": "./src/index.js",
+  "types": "./src/index.d.ts",
+  "dependencies": {
+    "tslib": "^2.8.1"
+  }
+}

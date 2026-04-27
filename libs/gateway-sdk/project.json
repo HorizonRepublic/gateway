@@ -1,0 +1,36 @@
+{
+  "name": "gateway-sdk",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "sourceRoot": "libs/gateway-sdk/src",
+  "projectType": "library",
+  "tags": [],
+  "targets": {
+    "build": {
+      "executor": "@nx/js:tsc",
+      "outputs": ["{options.outputPath}"],
+      "options": {
+        "outputPath": "dist/libs/gateway-sdk",
+        "tsConfig": "libs/gateway-sdk/tsconfig.lib.json",
+        "packageJson": "libs/gateway-sdk/package.json",
+        "main": "libs/gateway-sdk/src/index.ts",
+        "assets": ["libs/gateway-sdk/*.md"],
+        "updateBuildableProjectDepsInPackageJson": true
+      }
+    },
+    "test": {
+      "executor": "nx:run-commands",
+      "cache": true,
+      "inputs": [
+        "default",
+        "^default",
+        "{workspaceRoot}/jest.preset.js",
+        { "externalDependencies": ["jest"] }
+      ],
+      "outputs": ["{workspaceRoot}/coverage/libs/gateway-sdk"],
+      "options": {
+        "cwd": "libs/gateway-sdk",
+        "command": "node --experimental-vm-modules ../../node_modules/jest/bin/jest.js"
+      }
+    }
+  }
+}
