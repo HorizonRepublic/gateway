@@ -1,0 +1,27 @@
+---
+sidebar_position: 1
+sidebar_label: "Why Horizon Gateway?"
+title: "Why Horizon Gateway? — Edge HTTP termination on top of NATS"
+description: "When to reach for Horizon Gateway over a generic API gateway, a NestJS Fastify app, or a hand-rolled HTTP-to-NATS bridge."
+schema:
+  type: Article
+  headline: "Why Horizon Gateway? — Edge HTTP termination on top of NATS"
+  description: "When to reach for Horizon Gateway over a generic API gateway, a NestJS Fastify app, or a hand-rolled HTTP-to-NATS bridge."
+  datePublished: "2026-04-27"
+  dateModified: "2026-04-27"
+---
+
+# Why Horizon Gateway?
+
+> **Use when:** your system already speaks NATS internally and you want one battle-tested, language-agnostic edge for HTTP clients without paying the per-service ingress cost.
+> **You pick:** Horizon Gateway when you want type-safe route declaration in the SDK consumer, contract-enforced HTTP↔NATS translation, and a single point to terminate auth and rate limits.
+
+:::info Coming soon
+The full comparison — Horizon Gateway versus a NestJS Fastify app, versus an Envoy / Kong setup, versus a hand-rolled HTTP-to-NATS bridge — lands as the components are ported and the production posture solidifies.
+:::
+
+## Where to next
+
+- [Installation](/docs/getting-started/installation) — packages, runtime requirements, local NATS.
+- [Quick Start](/docs/getting-started/quick-start) — first request end-to-end.
+- [Architecture overview](/docs/architecture/overview) — the deployment topology.
