@@ -1,0 +1,80 @@
+{
+  "name": "gateway-server",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "sourceRoot": "apps/gateway-server",
+  "projectType": "application",
+  "tags": [],
+  "targets": {
+    "build": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "go build -o ../../dist/apps/gateway-server/gateway ./cmd/gateway",
+        "cwd": "apps/gateway-server"
+      }
+    },
+    "serve": {
+      "dependsOn": ["build"],
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "NATS_URLS=${NATS_URLS:-nats://localhost:4222} KV_BUCKET=${KV_BUCKET:-handler_registry} HTTP_ADDR=${HTTP_ADDR:-:8080} LOG_FORMAT=${LOG_FORMAT:-console} LOG_LEVEL=${LOG_LEVEL:-debug} ENVIRONMENT=${ENVIRONMENT:-development} go run ./cmd/gateway",
+        "cwd": "apps/gateway-server"
+      }
+    },
+    "test": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "go test -race ./...",
+        "cwd": "apps/gateway-server"
+      }
+    },
+    "test-integration": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "go test -race -tags=integration ./...",
+        "cwd": "apps/gateway-server"
+      }
+    },
+    "e2e": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "go test -tags=e2e -race -count=1 ./e2e/...",
+        "cwd": "apps/gateway-server"
+      }
+    },
+    "e2e-up": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "docker compose -f e2e/docker-compose.yml up -d --wait",
+        "cwd": "apps/gateway-server"
+      }
+    },
+    "e2e-down": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "docker compose -f e2e/docker-compose.yml down -v",
+        "cwd": "apps/gateway-server"
+      }
+    },
+    "bench": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "go test -bench=. -benchmem -benchtime=1s -run=^$ ./...",
+        "cwd": "apps/gateway-server"
+      }
+    },
+    "lint": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "golangci-lint run ./...",
+        "cwd": "apps/gateway-server"
+      }
+    },
+    "tidy": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "go mod tidy",
+        "cwd": "apps/gateway-server"
+      }
+    }
+  }
+}

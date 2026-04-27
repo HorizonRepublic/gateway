@@ -1,0 +1,93 @@
+version: "2"
+
+# CI-enforced lint config for the gateway-server. Goal: catch real
+# regressions without becoming stylistic noise. Thresholds are tuned to
+# the current codebase; raise them only when a deliberate refactor
+# would otherwise be blocked, never to silence a real smell.
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  default: none
+  enable:
+    - bodyclose
+    - dupl
+    - errcheck
+    - gocognit
+    - govet
+    - ineffassign
+    - misspell
+    - revive
+    - staticcheck
+    - unparam
+    - unused
+    - wrapcheck
+
+  settings:
+    gocognit:
+      # Hot-path handlers and CAS loops sit under 30 today; 30 leaves
+      # headroom for small additions without inviting another 40+
+      # function to land unnoticed.
+      min-complexity: 30
+    dupl:
+      # Fragments 150+ tokens are usually a real duplication, not
+      # parallel test setup.
+      threshold: 150
+    revive:
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: dot-imports
+        - name: error-return
+        - name: error-strings
+        - name: error-naming
+        - name: exported
+          disabled: true
+        - name: if-return
+        - name: increment-decrement
+        - name: var-naming
+        - name: var-declaration
+        - name: package-comments
+          disabled: true
+        - name: range
+        - name: receiver-naming
+        - name: time-naming
+        - name: unexported-return
+        - name: indent-error-flow
+        - name: errorf
+        - name: empty-block
+        - name: superfluous-else
+        - name: unused-parameter
+          disabled: true
+        - name: unreachable-code
+        - name: redefines-builtin-id
+    wrapcheck:
+      ignoreSigs:
+        - .Errorf(
+        - errors.New(
+        - errors.Unwrap(
+        - errors.Join(
+        - .Wrap(
+        - .Wrapf(
+        - .WithMessage(
+        - .WithMessagef(
+        - .WithStack(
+
+  exclusions:
+    rules:
+      # Test files often wrap third-party errors with assert helpers
+      # and do not benefit from wrapcheck — the noise-to-signal ratio
+      # there is low. dupl + gocognit are excluded for similar
+      # reasons: parallel test setups are intentionally repetitive.
+      - path: _test\.go
+        linters:
+          - wrapcheck
+          - dupl
+          - gocognit
+          - unparam
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
