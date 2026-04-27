@@ -11,3 +11,5 @@ export { assertCorsCredentialsNotWildcard } from './cors-validator';
 export { assertRateLimitConfig } from './rate-limit-validator';
 
 export { parseCookies } from './cookie-parser';
+
+export { serializeCookie } from './cookie-serializer';
