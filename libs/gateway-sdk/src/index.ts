@@ -12,3 +12,5 @@ export * from './constants';
 export * from './normalization';
 
 export * from './decorators';
+
+export * from './filters';
