@@ -30,3 +30,7 @@ export type {
 } from './gateway-route-auth-options.interface';
 
 export type { IGatewayRouteOptions } from './gateway-route-options.interface';
+
+export type { IGatewayDefaults } from './gateway-defaults.interface';
+
+export type { IGatewayAuthVerifierOptions } from './gateway-auth-verifier-options.interface';
