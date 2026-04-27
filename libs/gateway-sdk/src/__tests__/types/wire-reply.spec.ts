@@ -1,6 +1,11 @@
 import { describe, expect, it } from '@jest/globals';
 
-import type { ICookieOptions, IGatewayErrorBody, IGatewayReply, IGatewayResponse } from './index';
+import type {
+  ICookieOptions,
+  IGatewayErrorBody,
+  IGatewayReply,
+  IGatewayResponse,
+} from '../../types';
 
 describe('wire reply envelope types', () => {
   it('compiles a structurally valid IGatewayReply success envelope', () => {

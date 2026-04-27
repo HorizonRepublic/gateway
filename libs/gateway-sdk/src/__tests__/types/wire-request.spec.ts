@@ -5,7 +5,7 @@ import type {
   IGatewayRequest,
   IGatewayRequestMeta,
   IGatewayRouteContext,
-} from './index';
+} from '../../types';
 
 describe('wire request envelope types', () => {
   it('compiles a structurally valid IGatewayRequest', () => {
