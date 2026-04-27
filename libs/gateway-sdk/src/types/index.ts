@@ -13,3 +13,11 @@ export type { IGatewayResponse } from './gateway-response.interface';
 export type { IGatewayErrorBody } from './gateway-error-body.interface';
 
 export type { ICookieOptions } from './cookie-options.interface';
+
+export type { IGatewayCorsConfig } from './gateway-cors-config.interface';
+
+export type {
+  IGatewayRateLimitConfig,
+  RateLimitKey,
+  RateLimitStore,
+} from './gateway-rate-limit-config.interface';
