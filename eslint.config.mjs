@@ -412,7 +412,6 @@ export default [
           checkVersionMismatches: true,
           ignoredFiles: ['{projectRoot}/eslint.config.{js,cjs,mjs,ts,cts,mts}'],
           useLocalPathsForWorkspaceDependencies: true,
-          peerDepsVersionStrategy: 'workspace',
         },
       ],
     },
