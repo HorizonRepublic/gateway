@@ -78,3 +78,50 @@ services:
     <<: *gateway-server-base
     ports:
       - "8080"
+
+  # PR 9 trusted-proxy variant: same image and trust set as the primary,
+  # but TRUSTED_PROXY_HEADER is flipped to X-Real-IP so requests resolve
+  # via the single-value (ResolveClientIPSingle) code path instead of
+  # the rightmost-untrusted XFF chain walk. The env block is inlined
+  # because the header knob diverges from the shared anchor.
+  gateway-server-realip:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    environment:
+      NATS_URLS: nats://nats:4222
+      KV_BUCKET: handler_registry
+      HTTP_ADDR: ":8080"
+      LOG_FORMAT: console
+      LOG_LEVEL: info
+      ENVIRONMENT: e2e
+      TRUSTED_PROXIES: "172.16.0.0/12,192.168.0.0/16"
+      TRUSTED_PROXY_HEADER: "X-Real-IP"
+    depends_on:
+      example-app:
+        condition: service_healthy
+    ports:
+      - "8080"
+
+  # PR 9 empty-trust variant: TRUSTED_PROXIES="" is the operator-explicit
+  # "trust nothing" form. The middleware always returns the peer IP and
+  # ignores any client-supplied X-Forwarded-For — the spoofing defence.
+  # caarlos0/env coerces unset to envDefault ("private"), so the empty
+  # value MUST be set explicitly to override.
+  gateway-server-notrust:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    environment:
+      NATS_URLS: nats://nats:4222
+      KV_BUCKET: handler_registry
+      HTTP_ADDR: ":8080"
+      LOG_FORMAT: console
+      LOG_LEVEL: info
+      ENVIRONMENT: e2e
+      TRUSTED_PROXIES: ""
+    depends_on:
+      example-app:
+        condition: service_healthy
+    ports:
+      - "8080"

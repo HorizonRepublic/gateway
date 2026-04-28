@@ -48,10 +48,12 @@ var (
 // handler_registry KV. natsURL is consumed by NATSConn for tests that
 // mutate KV directly (PR 8 onwards).
 type liveStack struct {
-	compose     compose.ComposeStack
-	gatewayURL  string
-	gatewayURLB string
-	natsURL     string
+	compose            compose.ComposeStack
+	gatewayURL         string
+	gatewayURLB        string
+	gatewayURLRealIP   string
+	gatewayURLNoTrust  string
+	natsURL            string
 }
 
 // startStack brings the Compose stack up exactly once per test process.
@@ -77,6 +79,14 @@ func startStack(ctx context.Context) (*liveStack, error) {
 	if err != nil {
 		return nil, err
 	}
+	urlRealIP, err := resolveGatewayURL(ctx, c, "gateway-server-realip")
+	if err != nil {
+		return nil, err
+	}
+	urlNoTrust, err := resolveGatewayURL(ctx, c, "gateway-server-notrust")
+	if err != nil {
+		return nil, err
+	}
 
 	natsURL, err := resolveNATSURL(ctx, c)
 	if err != nil {
@@ -84,10 +94,12 @@ func startStack(ctx context.Context) (*liveStack, error) {
 	}
 
 	return &liveStack{
-		compose:     c,
-		gatewayURL:  urlA,
-		gatewayURLB: urlB,
-		natsURL:     natsURL,
+		compose:           c,
+		gatewayURL:        urlA,
+		gatewayURLB:       urlB,
+		gatewayURLRealIP:  urlRealIP,
+		gatewayURLNoTrust: urlNoTrust,
+		natsURL:           natsURL,
 	}, nil
 }
 
@@ -169,6 +181,22 @@ func GatewayURLB(t *testing.T) string {
 	return resolve(t).gatewayURLB
 }
 
+// GatewayURLRealIP returns the host-resolved URL of the trusted-proxy
+// replica configured with `TRUSTED_PROXY_HEADER=X-Real-IP`. PR 9 alt-
+// header tests use this to exercise the single-value
+// (ResolveClientIPSingle) code path.
+func GatewayURLRealIP(t *testing.T) string {
+	return resolve(t).gatewayURLRealIP
+}
+
+// GatewayURLNoTrust returns the host-resolved URL of the trusted-proxy
+// replica configured with `TRUSTED_PROXIES=""` (operator-explicit
+// "trust nothing"). PR 9 empty-trust tests use this to verify XFF
+// spoofs are ignored.
+func GatewayURLNoTrust(t *testing.T) string {
+	return resolve(t).gatewayURLNoTrust
+}
+
 // WaitReady blocks until the primary gateway accepts a GET on /readyz
 // and returns 200. Times out after readyTimeout.
 func WaitReady(t *testing.T) {
@@ -181,6 +209,12 @@ func WaitReady(t *testing.T) {
 func WaitReadyB(t *testing.T) {
 	waitReadyAt(t, GatewayURLB(t))
 }
+
+// WaitReadyAt polls /readyz on the supplied base URL until it returns
+// 200 or the readyTimeout elapses. Exported so trustedproxy tests can
+// gate on the realip / notrust replicas without growing one
+// WaitReadyX helper per replica.
+func WaitReadyAt(t *testing.T, baseURL string) { waitReadyAt(t, baseURL) }
 
 // waitReadyAt polls /readyz on the supplied base URL until it returns
 // 200 or the readyTimeout elapses.
