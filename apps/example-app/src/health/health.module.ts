@@ -1,7 +1,7 @@
 import { Module } from '@nestjs/common';
 
-import { HealthController } from './health.controller';
 import { HealthStateModule } from './health.bootstrap';
+import { HealthController } from './health.controller';
 import { ResetController } from './reset.controller';
 
 @Module({

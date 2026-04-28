@@ -31,16 +31,16 @@
       "executor": "nx:run-commands",
       "dependsOn": ["build"],
       "options": {
-        "command": "docker build -t horizon-example-app:local -f apps/example-app/Dockerfile ../..",
-        "cwd": "apps/example-app"
+        "command": "docker build -t horizon-example-app:local -f apps/example-app/Dockerfile .",
+        "cwd": "."
       }
     },
     "serve": {
-      "executor": "@nx/js:node",
+      "executor": "nx:run-commands",
       "dependsOn": ["build"],
       "options": {
-        "buildTarget": "example-app:build",
-        "watch": true
+        "cwd": "apps/example-app",
+        "command": "node ../../dist/apps/example-app/main.js"
       }
     },
     "test": {
