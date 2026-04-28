@@ -1,0 +1,57 @@
+{
+  "name": "example-app",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "sourceRoot": "apps/example-app/src",
+  "projectType": "application",
+  "tags": [],
+  "targets": {
+    "build": {
+      "executor": "@nx/webpack:webpack",
+      "outputs": ["{options.outputPath}"],
+      "defaultConfiguration": "production",
+      "options": {
+        "target": "node",
+        "compiler": "tsc",
+        "outputPath": "dist/apps/example-app",
+        "main": "apps/example-app/src/main.ts",
+        "tsConfig": "apps/example-app/tsconfig.app.json",
+        "assets": [],
+        "isolatedConfig": true,
+        "webpackConfig": "apps/example-app/webpack.config.js"
+      },
+      "configurations": {
+        "production": {
+          "optimization": true,
+          "extractLicenses": true,
+          "inspect": false
+        }
+      }
+    },
+    "build-image": {
+      "executor": "nx:run-commands",
+      "dependsOn": ["build"],
+      "options": {
+        "command": "docker build -t horizon-example-app:local -f apps/example-app/Dockerfile .",
+        "cwd": "."
+      }
+    },
+    "serve": {
+      "executor": "nx:run-commands",
+      "dependsOn": ["build"],
+      "options": {
+        "cwd": "apps/example-app",
+        "command": "node ../../dist/apps/example-app/main.js"
+      }
+    },
+    "test": {
+      "executor": "nx:run-commands",
+      "options": {
+        "cwd": "apps/example-app",
+        "command": "node --experimental-vm-modules ../../node_modules/jest/bin/jest.js"
+      }
+    },
+    "lint": {
+      "executor": "@nx/eslint:lint"
+    }
+  }
+}

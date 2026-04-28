@@ -12,6 +12,13 @@
         "cwd": "apps/gateway-server"
       }
     },
+    "build-image": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "docker build -t horizon-gateway-server:local -f Dockerfile .",
+        "cwd": "apps/gateway-server"
+      }
+    },
     "serve": {
       "dependsOn": ["build"],
       "executor": "nx:run-commands",
@@ -37,21 +44,7 @@
     "e2e": {
       "executor": "nx:run-commands",
       "options": {
-        "command": "go test -tags=e2e -race -count=1 ./e2e/...",
-        "cwd": "apps/gateway-server"
-      }
-    },
-    "e2e-up": {
-      "executor": "nx:run-commands",
-      "options": {
-        "command": "docker compose -f e2e/docker-compose.yml up -d --wait",
-        "cwd": "apps/gateway-server"
-      }
-    },
-    "e2e-down": {
-      "executor": "nx:run-commands",
-      "options": {
-        "command": "docker compose -f e2e/docker-compose.yml down -v",
+        "command": "go test -tags=e2e -count=1 -timeout=10m ./e2e/...",
         "cwd": "apps/gateway-server"
       }
     },

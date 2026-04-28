@@ -1,0 +1,46 @@
+services:
+  nats:
+    image: nats:2.12-alpine
+    command: ["-js", "-m", "8222"]
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8222/healthz"]
+      interval: 1s
+      timeout: 1s
+      retries: 30
+
+  example-app:
+    build:
+      context: ../../..
+      dockerfile: apps/example-app/Dockerfile
+    environment:
+      NATS_URL: nats://nats:4222
+      HEALTH_PORT: "3001"
+    depends_on:
+      nats:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - /nodejs/bin/node
+        - -e
+        - "fetch('http://127.0.0.1:3001/readyz').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+      interval: 1s
+      timeout: 2s
+      retries: 30
+
+  gateway-server:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    environment:
+      NATS_URLS: nats://nats:4222
+      KV_BUCKET: handler_registry
+      HTTP_ADDR: ":8080"
+      LOG_FORMAT: console
+      LOG_LEVEL: info
+      ENVIRONMENT: e2e
+    depends_on:
+      example-app:
+        condition: service_healthy
+    ports:
+      - "8080"
