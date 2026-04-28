@@ -2,7 +2,7 @@
 
 # Stage 1 - install workspace dependencies (the build context is the
 # repo root so the lockfile resolves the full workspace).
-FROM node:20-alpine AS deps
+FROM node:24-alpine AS deps
 WORKDIR /repo
 RUN corepack enable
 COPY package.json pnpm-lock.yaml .npmrc ./
@@ -19,7 +19,7 @@ COPY apps/example-app ./apps/example-app
 RUN node_modules/.bin/nx build example-app --configuration=production
 
 # Stage 3 - distroless runtime.
-FROM gcr.io/distroless/nodejs20-debian12 AS runtime
+FROM gcr.io/distroless/nodejs24-debian12 AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 COPY --from=build /repo/dist/apps/example-app /app
