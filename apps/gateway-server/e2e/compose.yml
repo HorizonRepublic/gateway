@@ -1,3 +1,32 @@
+# Shared YAML anchor for the gateway-server image build context plus
+# its env block. Replicas A and B use this verbatim so any drift between
+# them would fail the multi-replica rate-limit tests instead of going
+# unnoticed.
+x-gateway-server-base: &gateway-server-base
+  build:
+    context: ..
+    dockerfile: Dockerfile
+  environment:
+    NATS_URLS: nats://nats:4222
+    KV_BUCKET: handler_registry
+    HTTP_ADDR: ":8080"
+    LOG_FORMAT: console
+    LOG_LEVEL: info
+    ENVIRONMENT: e2e
+    # Trust the Docker / Docker-Desktop bridge subnets so the gateway
+    # treats the connection as proxied and walks X-Forwarded-For. The
+    # XFF chain walk is rightmost-untrusted: with these CIDRs the
+    # peer (172.x or 192.168.x docker bridge) is trusted, but the
+    # tests' spoofed entries (10.99.x.x) are not — so the spoof
+    # becomes the resolved client IP and feeds keyBy:'ip'. We
+    # deliberately omit 10.0.0.0/8 so the spoof shape stays untrusted.
+    # Strictly e2e-only; production deployments configure a real list
+    # per surface/trustedproxy.md.
+    TRUSTED_PROXIES: "172.16.0.0/12,192.168.0.0/16"
+  depends_on:
+    example-app:
+      condition: service_healthy
+
 services:
   nats:
     image: nats:2.12-alpine
@@ -31,28 +60,16 @@ services:
       - "3001"
 
   gateway-server:
-    build:
-      context: ..
-      dockerfile: Dockerfile
-    environment:
-      NATS_URLS: nats://nats:4222
-      KV_BUCKET: handler_registry
-      HTTP_ADDR: ":8080"
-      LOG_FORMAT: console
-      LOG_LEVEL: info
-      ENVIRONMENT: e2e
-      # Trust the Docker / Docker-Desktop bridge subnets so the gateway
-      # treats the connection as proxied and walks X-Forwarded-For. The
-      # XFF chain walk is rightmost-untrusted: with these CIDRs the
-      # peer (172.x or 192.168.x docker bridge) is trusted, but the
-      # tests' spoofed entries (10.99.x.x) are not — so the spoof
-      # becomes the resolved client IP and feeds keyBy:'ip'. We
-      # deliberately omit 10.0.0.0/8 so the spoof shape stays untrusted.
-      # Strictly e2e-only; production deployments configure a real list
-      # per surface/trustedproxy.md.
-      TRUSTED_PROXIES: "172.16.0.0/12,192.168.0.0/16"
-    depends_on:
-      example-app:
-        condition: service_healthy
+    <<: *gateway-server-base
+    ports:
+      - "8080"
+
+  # Second replica for PR 7's multi-replica rate-limit tests. Same image,
+  # same NATS, same KV bucket. Routes with `store: 'nats-kv'` share TAT
+  # state across both; routes with `store: 'memory'` (the default) keep
+  # their counters in-process per replica, which is the negative case
+  # the test pair pins.
+  gateway-server-b:
+    <<: *gateway-server-base
     ports:
       - "8080"

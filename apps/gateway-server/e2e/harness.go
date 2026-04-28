@@ -40,10 +40,14 @@ var (
 )
 
 // liveStack carries the testcontainers Compose handle plus the
-// resolved gateway URL discovered after the stack came up.
+// resolved gateway URLs discovered after the stack came up. The
+// `b` URL is the second replica added in PR 7 for multi-replica
+// rate-limit tests; both replicas share NATS and the handler_registry
+// KV.
 type liveStack struct {
-	compose    compose.ComposeStack
-	gatewayURL string
+	compose     compose.ComposeStack
+	gatewayURL  string
+	gatewayURLB string
 }
 
 // startStack brings the Compose stack up exactly once per test process.
@@ -61,23 +65,40 @@ func startStack(ctx context.Context) (*liveStack, error) {
 		return nil, fmt.Errorf("compose up: %w", err)
 	}
 
-	gw, err := c.ServiceContainer(ctx, "gateway-server")
+	urlA, err := resolveGatewayURL(ctx, c, "gateway-server")
 	if err != nil {
-		return nil, fmt.Errorf("resolve gateway-server container: %w", err)
+		return nil, err
 	}
-	host, err := gw.Host(ctx)
+	urlB, err := resolveGatewayURL(ctx, c, "gateway-server-b")
 	if err != nil {
-		return nil, fmt.Errorf("gateway host: %w", err)
-	}
-	port, err := gw.MappedPort(ctx, "8080/tcp")
-	if err != nil {
-		return nil, fmt.Errorf("gateway port: %w", err)
+		return nil, err
 	}
 
 	return &liveStack{
-		compose:    c,
-		gatewayURL: fmt.Sprintf("http://%s:%s", host, port.Port()),
+		compose:     c,
+		gatewayURL:  urlA,
+		gatewayURLB: urlB,
 	}, nil
+}
+
+// resolveGatewayURL returns the host-resolved http://host:port URL for
+// the named gateway-server replica. Both replicas in the e2e Compose
+// expose port 8080 inside the network and a different ephemeral host
+// port; testcontainers picks each independently.
+func resolveGatewayURL(ctx context.Context, c compose.ComposeStack, service string) (string, error) {
+	gw, err := c.ServiceContainer(ctx, service)
+	if err != nil {
+		return "", fmt.Errorf("resolve %s container: %w", service, err)
+	}
+	host, err := gw.Host(ctx)
+	if err != nil {
+		return "", fmt.Errorf("%s host: %w", service, err)
+	}
+	port, err := gw.MappedPort(ctx, "8080/tcp")
+	if err != nil {
+		return "", fmt.Errorf("%s port: %w", service, err)
+	}
+	return fmt.Sprintf("http://%s:%s", host, port.Port()), nil
 }
 
 // stopStack tears the Compose stack down and removes named volumes.
@@ -102,18 +123,40 @@ func resolve(t *testing.T) *liveStack {
 	return stack
 }
 
-// GatewayURL returns the host-resolved URL of the gateway-server
+// GatewayURL returns the host-resolved URL of the primary gateway-server
 // container — e.g. "http://127.0.0.1:54321". Tests use it as the base
-// for every HTTP request.
+// for every HTTP request that does not specifically need the second
+// replica.
 func GatewayURL(t *testing.T) string {
 	return resolve(t).gatewayURL
 }
 
-// WaitReady blocks until the gateway accepts a GET on /readyz and
-// returns 200. Times out after readyTimeout.
+// GatewayURLB returns the host-resolved URL of the second gateway-server
+// replica (`gateway-server-b` in compose.yml). Both replicas share the
+// same NATS connection and handler_registry bucket; tests that exercise
+// multi-replica rate-limit consistency split traffic between A and B.
+func GatewayURLB(t *testing.T) string {
+	return resolve(t).gatewayURLB
+}
+
+// WaitReady blocks until the primary gateway accepts a GET on /readyz
+// and returns 200. Times out after readyTimeout.
 func WaitReady(t *testing.T) {
+	waitReadyAt(t, GatewayURL(t))
+}
+
+// WaitReadyB blocks until the second gateway replica accepts a GET on
+// /readyz and returns 200. Multi-replica tests call WaitReadyB after
+// WaitReady so both replicas are confirmed live before traffic splits.
+func WaitReadyB(t *testing.T) {
+	waitReadyAt(t, GatewayURLB(t))
+}
+
+// waitReadyAt polls /readyz on the supplied base URL until it returns
+// 200 or the readyTimeout elapses.
+func waitReadyAt(t *testing.T, baseURL string) {
 	t.Helper()
-	url := GatewayURL(t) + "/readyz"
+	url := baseURL + "/readyz"
 	deadline := time.Now().Add(readyTimeout)
 	client := &http.Client{Timeout: 2 * time.Second}
 
@@ -131,7 +174,7 @@ func WaitReady(t *testing.T) {
 			lastErr = err
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("gateway /readyz did not return 200 within %s (last err: %v)", readyTimeout, lastErr)
+			t.Fatalf("%s /readyz did not return 200 within %s (last err: %v)", baseURL, readyTimeout, lastErr)
 		}
 		time.Sleep(readyPollInterval)
 	}
