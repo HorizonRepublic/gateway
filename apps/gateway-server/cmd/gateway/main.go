@@ -17,6 +17,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"sync/atomic"
@@ -234,9 +235,21 @@ func connectNATSOrDie(cfg *config.Config, logger zerolog.Logger) *natsgo.Conn {
 // It returns both the JetStream context and the KeyValue handle:
 // the JetStream context is needed by downstream components that
 // create additional KV buckets at startup (e.g., the ratelimit
-// Router). Failure is fatal because a gateway with no routing table
-// cannot forward a single request — refusing to start is strictly
-// better than starting in a state where every request 404s.
+// Router).
+//
+// Bucket-presence policy: if the bucket does not exist yet (cold
+// cluster, fresh deploy where no SDK service has booted, ordering
+// race during a docker-compose stack-up), the gateway creates it
+// itself with sensible defaults instead of refusing to start. This
+// removes a chicken-and-egg between the gateway and SDK consumers:
+// either side can come up first; the bucket appears for whoever wins.
+// Existing entries written by the SDK survive — CreateKeyValue is a
+// no-op once the underlying stream is present, but here we only call
+// it on the explicit ErrBucketNotFound path so a healthy SDK-created
+// bucket is never touched.
+//
+// All other JetStream errors remain fatal — a transport fault or
+// permission error is not a recoverable bootstrap state.
 func openKVOrDie(
 	ctx context.Context,
 	nc *natsgo.Conn,
@@ -248,8 +261,21 @@ func openKVOrDie(
 		logger.Fatal().Err(err).Msg("jetstream init failed")
 	}
 	kv, err := js.KeyValue(ctx, cfg.KVBucket)
-	if err != nil {
+	if err == nil {
+		return js, kv
+	}
+	if !errors.Is(err, jetstream.ErrBucketNotFound) {
 		logger.Fatal().Err(err).Str("bucket", cfg.KVBucket).Msg("open kv bucket failed")
+	}
+	logger.Info().
+		Str("bucket", cfg.KVBucket).
+		Msg("kv bucket missing; creating with default config")
+	kv, err = js.CreateKeyValue(ctx, jetstream.KeyValueConfig{
+		Bucket:  cfg.KVBucket,
+		History: 1,
+	})
+	if err != nil {
+		logger.Fatal().Err(err).Str("bucket", cfg.KVBucket).Msg("kv bucket create failed")
 	}
 	return js, kv
 }
