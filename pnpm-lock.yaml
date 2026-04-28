@@ -15,7 +15,7 @@ importers:
     dependencies:
       '@horizon-republic/nestjs-jetstream':
         specifier: ^2.10.0
-        version: 2.10.0(@nestjs/common@12.0.0-alpha.2(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@12.0.0-alpha.2)(@nestjs/microservices@12.0.0-alpha.2)(reflect-metadata@0.2.2)(rxjs@7.8.2)
+        version: 2.10.0(@nestjs/common@12.0.0-alpha.2(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@12.0.0-alpha.2)(@nestjs/microservices@12.0.0-alpha.2)(@opentelemetry/api@1.9.1)(reflect-metadata@0.2.2)(rxjs@7.8.2)
       '@nestjs/common':
         specifier: 12.0.0-alpha.2
         version: 12.0.0-alpha.2(reflect-metadata@0.2.2)(rxjs@7.8.2)
@@ -28,6 +28,9 @@ importers:
       '@nestjs/platform-fastify':
         specifier: 12.0.0-alpha.2
         version: 12.0.0-alpha.2(@nestjs/common@12.0.0-alpha.2(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@12.0.0-alpha.2)
+      '@opentelemetry/api':
+        specifier: ^1.9.1
+        version: 1.9.1
       fastify:
         specifier: 5.8.4
         version: 5.8.4
@@ -1495,6 +1498,10 @@ packages:
 
   '@nx/workspace@22.6.5':
     resolution: {integrity: sha512-/CZtv1ESSfZ1MVqSlCsmnBWysU1z5VdNlwANlqL6BV2X6RUHKDPVj4YuNPvCK+0LsqyzfJdUt3pcnBYxnT5TIg==}
+
+  '@opentelemetry/api@1.9.1':
+    resolution: {integrity: sha512-gLyJlPHPZYdAk1JENA9LeHejZe1Ti77/pTeFm/nMXmQH/HFZlcS/O2XJB+L8fkbrNSqhdtlvjBVjxwUYanNH5Q==}
+    engines: {node: '>=8.0.0'}
 
   '@package-json/types@0.0.12':
     resolution: {integrity: sha512-uu43FGU34B5VM9mCNjXCwLaGHYjXdNincqKLaraaCW+7S2+SmiBg1Nv8bPnmschrIfZmfKNY9f3fC376MRrObw==}
@@ -6696,7 +6703,7 @@ snapshots:
 
   '@golevelup/ts-jest@3.0.0': {}
 
-  '@horizon-republic/nestjs-jetstream@2.10.0(@nestjs/common@12.0.0-alpha.2(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@12.0.0-alpha.2)(@nestjs/microservices@12.0.0-alpha.2)(reflect-metadata@0.2.2)(rxjs@7.8.2)':
+  '@horizon-republic/nestjs-jetstream@2.10.0(@nestjs/common@12.0.0-alpha.2(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@12.0.0-alpha.2)(@nestjs/microservices@12.0.0-alpha.2)(@opentelemetry/api@1.9.1)(reflect-metadata@0.2.2)(rxjs@7.8.2)':
     dependencies:
       '@nats-io/jetstream': 3.3.1
       '@nats-io/kv': 3.3.1
@@ -6707,6 +6714,8 @@ snapshots:
       '@nestjs/microservices': 12.0.0-alpha.2(@nats-io/transport-node@3.3.1)(@nestjs/common@12.0.0-alpha.2(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@12.0.0-alpha.2)(reflect-metadata@0.2.2)(rxjs@7.8.2)
       reflect-metadata: 0.2.2
       rxjs: 7.8.2
+    optionalDependencies:
+      '@opentelemetry/api': 1.9.1
 
   '@humanfs/core@0.19.2':
     dependencies:
@@ -7432,6 +7441,8 @@ snapshots:
       - '@swc-node/register'
       - '@swc/core'
       - debug
+
+  '@opentelemetry/api@1.9.1': {}
 
   '@package-json/types@0.0.12': {}
 
