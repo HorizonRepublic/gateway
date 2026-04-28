@@ -9,6 +9,7 @@ require (
 	github.com/nats-io/nats.go v1.51.0
 	github.com/oklog/ulid/v2 v2.1.1
 	github.com/rs/zerolog v1.35.1
+	github.com/sony/gobreaker v1.0.0
 	github.com/stretchr/testify v1.11.1
 	github.com/testcontainers/testcontainers-go/modules/nats v0.42.0
 )
