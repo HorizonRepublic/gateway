@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go/modules/compose"
 )
@@ -40,14 +42,16 @@ var (
 )
 
 // liveStack carries the testcontainers Compose handle plus the
-// resolved gateway URLs discovered after the stack came up. The
-// `b` URL is the second replica added in PR 7 for multi-replica
-// rate-limit tests; both replicas share NATS and the handler_registry
-// KV.
+// resolved gateway URLs and NATS host endpoint discovered after the
+// stack came up. The `b` URL is the second replica added in PR 7 for
+// multi-replica rate-limit tests; both replicas share NATS and the
+// handler_registry KV. natsURL is consumed by NATSConn for tests that
+// mutate KV directly (PR 8 onwards).
 type liveStack struct {
 	compose     compose.ComposeStack
 	gatewayURL  string
 	gatewayURLB string
+	natsURL     string
 }
 
 // startStack brings the Compose stack up exactly once per test process.
@@ -74,11 +78,37 @@ func startStack(ctx context.Context) (*liveStack, error) {
 		return nil, err
 	}
 
+	natsURL, err := resolveNATSURL(ctx, c)
+	if err != nil {
+		return nil, err
+	}
+
 	return &liveStack{
 		compose:     c,
 		gatewayURL:  urlA,
 		gatewayURLB: urlB,
+		natsURL:     natsURL,
 	}, nil
+}
+
+// resolveNATSURL returns the host-visible nats:// URL for the
+// nats container started by the Compose stack. PR 8 reload tests use
+// this to open a client connection from the test process and mutate
+// the handler_registry KV bucket directly.
+func resolveNATSURL(ctx context.Context, c compose.ComposeStack) (string, error) {
+	n, err := c.ServiceContainer(ctx, "nats")
+	if err != nil {
+		return "", fmt.Errorf("resolve nats container: %w", err)
+	}
+	host, err := n.Host(ctx)
+	if err != nil {
+		return "", fmt.Errorf("nats host: %w", err)
+	}
+	port, err := n.MappedPort(ctx, "4222/tcp")
+	if err != nil {
+		return "", fmt.Errorf("nats port: %w", err)
+	}
+	return fmt.Sprintf("nats://%s:%s", host, port.Port()), nil
 }
 
 // resolveGatewayURL returns the host-resolved http://host:port URL for
@@ -201,4 +231,89 @@ func ExampleAppHealthURL(t *testing.T) string {
 // in this package.
 func exampleAppHealthURL(t *testing.T) string {
 	return ExampleAppHealthURL(t)
+}
+
+// natsCacheOnce caches the per-process NATS connection that
+// PR 8 reload tests use to mutate the handler_registry KV bucket.
+// Tests share one connection so we don't spawn a fresh client per
+// test run.
+var (
+	natsCacheOnce sync.Once
+	natsCacheConn *nats.Conn
+	natsCacheErr  error
+)
+
+// NATSConn returns a cached NATS connection to the Compose stack's
+// nats container. Tests that mutate the handler_registry KV bucket
+// connect through this. The connection lives for the entire `go test`
+// process — there is no Close hook because Compose tear-down at
+// TestMain end terminates the server end of the connection.
+func NATSConn(t *testing.T) *nats.Conn {
+	t.Helper()
+	url := resolve(t).natsURL
+	natsCacheOnce.Do(func() {
+		natsCacheConn, natsCacheErr = nats.Connect(url, nats.Name("e2e-test-runner"))
+	})
+	require.NoError(t, natsCacheErr, "connect to compose-resolved NATS")
+	return natsCacheConn
+}
+
+// HandlerBucket returns a typed JetStream KV handle on the
+// handler_registry bucket. Reload tests PUT/DELETE entries through it
+// to drive the gateway's watcher.
+func HandlerBucket(t *testing.T) jetstream.KeyValue {
+	t.Helper()
+	conn := NATSConn(t)
+	js, err := jetstream.New(conn)
+	require.NoError(t, err, "open JetStream context")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	bucket, err := js.KeyValue(ctx, "handler_registry")
+	require.NoError(t, err, "open handler_registry KV bucket")
+	return bucket
+}
+
+// routeReloadDeadline bounds how long WaitForRoute polls for a routing
+// table delta to surface. The watcher reacts within tens of
+// milliseconds in steady state; 3 seconds is generous enough to cover
+// CI jitter without letting a stuck delta hang a test.
+const routeReloadDeadline = 3 * time.Second
+
+// routeReloadInterval is the cadence at which WaitForRoute probes the
+// gateway HTTP surface while waiting for a delta to land.
+const routeReloadInterval = 50 * time.Millisecond
+
+// WaitForRoute polls `<method> <path>` against the primary gateway
+// until the response status equals expectStatus, or routeReloadDeadline
+// elapses. Returns the matching response so the caller can read body
+// or headers if needed. The poll loop runs on its own request — the
+// caller gets a fresh body it owns.
+//
+// Use this after every KV mutation (PUT/DELETE) to wait for the
+// watcher to propagate the delta into the routing table. Asserting
+// the response status before the watcher has reacted would race.
+func WaitForRoute(t *testing.T, method, path string, expectStatus int) *http.Response {
+	t.Helper()
+	url := GatewayURL(t) + path
+	deadline := time.Now().Add(routeReloadDeadline)
+	client := &http.Client{Timeout: 2 * time.Second}
+
+	var lastStatus int
+	for {
+		req, err := http.NewRequest(method, url, nil)
+		require.NoError(t, err)
+		resp, err := client.Do(req)
+		if err == nil {
+			lastStatus = resp.StatusCode
+			if resp.StatusCode == expectStatus {
+				return resp
+			}
+			_ = resp.Body.Close()
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("WaitForRoute(%s %s, %d): last status %d after %s",
+				method, path, expectStatus, lastStatus, routeReloadDeadline)
+		}
+		time.Sleep(routeReloadInterval)
+	}
 }

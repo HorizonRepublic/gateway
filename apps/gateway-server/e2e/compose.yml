@@ -36,6 +36,11 @@ services:
       interval: 1s
       timeout: 1s
       retries: 30
+    # Expose 4222 to the host so the e2e test process can connect
+    # via testcontainers' resolved port. PR 8 reload tests mutate
+    # the handler_registry KV bucket directly through this port.
+    ports:
+      - "4222"
 
   example-app:
     build:
