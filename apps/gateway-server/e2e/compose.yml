@@ -27,6 +27,8 @@ services:
       interval: 1s
       timeout: 2s
       retries: 30
+    ports:
+      - "3001"
 
   gateway-server:
     build:

@@ -3,6 +3,7 @@ import { Module } from '@nestjs/common';
 import { GatewayModule } from '@horizon-republic/gateway-sdk';
 import { JetstreamModule } from '@horizon-republic/nestjs-jetstream';
 
+import { CoreModule } from './features/core/core.module';
 import { HealthStateModule } from './health/health.bootstrap';
 import { HealthModule } from './health/health.module';
 
@@ -15,6 +16,7 @@ import { HealthModule } from './health/health.module';
     GatewayModule.forRoot(),
     HealthStateModule,
     HealthModule,
+    CoreModule,
   ],
 })
 export class AppModule {}

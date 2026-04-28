@@ -79,7 +79,7 @@ func NewHertzAdapter(handler *proxy.Handler) app.HandlerFunc {
 	return func(stdCtx context.Context, ctx *app.RequestContext) {
 		input := buildServeInput(ctx)
 		result := handler.Handle(stdCtx, input)
-		writeServeResult(ctx, result)
+		writeServeResult(ctx, result, input.RequestID)
 	}
 }
 
@@ -205,7 +205,7 @@ func collectQueryValues(ctx *app.RequestContext) map[string]proxy.QueryValue {
 // targeted to the header the adapter itself stamped; other
 // header names reach the Add loop untouched and preserve
 // whatever semantics Hertz middleware may have configured.
-func writeServeResult(ctx *app.RequestContext, result *proxy.ServeResult) {
+func writeServeResult(ctx *app.RequestContext, result *proxy.ServeResult, requestID string) {
 	ctx.Response.Header.Del("X-Request-Id")
 
 	for key, values := range result.Headers {
@@ -223,6 +223,13 @@ func writeServeResult(ctx *app.RequestContext, result *proxy.ServeResult) {
 	if result.GatewayOwnedBody {
 		ctx.Response.Header.Set("Cache-Control", "no-store")
 	}
+
+	// Re-stamp X-Request-Id LAST so it always lands on the wire,
+	// regardless of whether the proxy emitted it via result.Headers.
+	// Gateway-owned error responses (404 routing miss, 405 method
+	// mismatch, 502/503/504 upstream failures) skip the SDK
+	// interceptor that would otherwise add it, so the adapter must.
+	ctx.Response.Header.Set("X-Request-Id", requestID)
 
 	ctx.SetStatusCode(result.Status)
 	ctx.Response.SetBody(result.Body)

@@ -182,16 +182,19 @@ func TestWriteServeResult_SetsStatusHeadersAndBody(t *testing.T) {
 		Status: 201,
 		Headers: map[string][]string{
 			"x-custom":     {"yes"},
-			"x-request-id": {"r-1"},
+			"x-request-id": {"forged-by-upstream"},
 		},
 		Body: []byte(`{"ok":true}`),
 	}
 
-	writeServeResult(ctx, result)
+	writeServeResult(ctx, result, "adapter-truth")
 
 	assert.Equal(t, 201, ctx.Response.StatusCode())
 	assert.Equal(t, "yes", string(ctx.Response.Header.Peek("x-custom")))
-	assert.Equal(t, "r-1", string(ctx.Response.Header.Peek("x-request-id")))
+	// The adapter's requestID always wins — a compromised upstream
+	// cannot forge correlator ids by stuffing X-Request-Id into the
+	// reply.
+	assert.Equal(t, "adapter-truth", string(ctx.Response.Header.Peek("x-request-id")))
 	assert.Equal(t, `{"ok":true}`, string(ctx.Response.Body()))
 }
 
@@ -207,7 +210,7 @@ func TestWriteServeResult_ForcesApplicationJSONContentType(t *testing.T) {
 		Body:    []byte(`"ok"`),
 	}
 
-	writeServeResult(ctx, result)
+	writeServeResult(ctx, result, "test-req-id")
 
 	assert.Contains(t, string(ctx.Response.Header.Peek("Content-Type")), "application/json")
 }
@@ -232,7 +235,7 @@ func TestWriteServeResult_EmitsMultipleSetCookieLines(t *testing.T) {
 		Body: []byte(`{}`),
 	}
 
-	writeServeResult(ctx, result)
+	writeServeResult(ctx, result, "test-req-id")
 
 	var lines []string
 	ctx.Response.Header.VisitAllCookie(func(_, value []byte) {
@@ -274,7 +277,7 @@ func TestWriteServeResult_DeduplicatesXRequestIdAcrossBuildAndWrite(t *testing.T
 		Body: []byte(`{"ok":true}`),
 	}
 
-	writeServeResult(ctx, result)
+	writeServeResult(ctx, result, input.RequestID)
 
 	var xRequestIDLines []string
 	ctx.Response.Header.VisitAll(func(key, value []byte) {
@@ -381,7 +384,7 @@ func TestWriteServeResult_StampsCacheControlNoStoreOnGatewayOwnedBody(t *testing
 		GatewayOwnedBody: true,
 	}
 
-	writeServeResult(ctx, result)
+	writeServeResult(ctx, result, "test-req-id")
 
 	assert.Equal(t, "no-store", string(ctx.Response.Header.Peek("Cache-Control")))
 }
@@ -399,7 +402,7 @@ func TestWriteServeResult_LeavesHandlerThrownErrorsUntouched(t *testing.T) {
 		GatewayOwnedBody: false,
 	}
 
-	writeServeResult(ctx, result)
+	writeServeResult(ctx, result, "test-req-id")
 
 	// Handler-owned Cache-Control stays intact.
 	assert.Equal(t, "private, max-age=60", string(ctx.Response.Header.Peek("Cache-Control")))

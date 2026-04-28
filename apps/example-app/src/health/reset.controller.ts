@@ -1,11 +1,14 @@
 import { Controller, HttpCode, Post } from '@nestjs/common';
 
+import { UsersService } from '../features/core/users.service';
+
 @Controller('__e2e')
 export class ResetController {
+  public constructor(private readonly users: UsersService) {}
+
   @Post('reset')
   @HttpCode(204)
   public reset(): void {
-    // PR 1 has no in-memory state to clear. Feature-pack PRs that add
-    // mutable handlers will inject their stores here and call reset().
+    this.users.reset();
   }
 }

@@ -136,3 +136,26 @@ func WaitReady(t *testing.T) {
 		time.Sleep(readyPollInterval)
 	}
 }
+
+// ExampleAppHealthURL returns the host-resolved URL for example-app's
+// Fastify health listener (port 3001 inside the Compose network).
+// Tests use it to call POST /__e2e/reset directly between scenarios
+// that mutate state.
+func ExampleAppHealthURL(t *testing.T) string {
+	t.Helper()
+	s := resolve(t)
+	ctx := context.Background()
+	c, err := s.compose.ServiceContainer(ctx, "example-app")
+	require.NoError(t, err)
+	host, err := c.Host(ctx)
+	require.NoError(t, err)
+	port, err := c.MappedPort(ctx, "3001/tcp")
+	require.NoError(t, err)
+	return fmt.Sprintf("http://%s:%s", host, port.Port())
+}
+
+// exampleAppHealthURL is the lower-case alias used by the test files
+// in this package.
+func exampleAppHealthURL(t *testing.T) string {
+	return ExampleAppHealthURL(t)
+}
