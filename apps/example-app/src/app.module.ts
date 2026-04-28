@@ -7,6 +7,7 @@ import { AuthModule } from './features/auth/auth.module';
 import { ContractModule } from './features/contract/contract.module';
 import { CoreModule } from './features/core/core.module';
 import { RateLimitModule } from './features/ratelimit/ratelimit.module';
+import { ReloadModule } from './features/reload/reload.module';
 import { ResponseModule } from './features/response/response.module';
 import { HealthStateModule } from './health/health.bootstrap';
 import { HealthModule } from './health/health.module';
@@ -39,6 +40,7 @@ import { HealthModule } from './health/health.module';
     ResponseModule,
     ContractModule,
     RateLimitModule,
+    ReloadModule,
   ],
 })
 export class AppModule {}
