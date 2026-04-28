@@ -9,6 +9,7 @@ import { CoreModule } from './features/core/core.module';
 import { RateLimitModule } from './features/ratelimit/ratelimit.module';
 import { ReloadModule } from './features/reload/reload.module';
 import { ResponseModule } from './features/response/response.module';
+import { SecurityModule } from './features/security/security.module';
 import { TrustedProxyModule } from './features/trustedproxy/trustedproxy.module';
 import { HealthStateModule } from './health/health.bootstrap';
 import { HealthModule } from './health/health.module';
@@ -42,6 +43,7 @@ import { HealthModule } from './health/health.module';
     ContractModule,
     RateLimitModule,
     ReloadModule,
+    SecurityModule,
     TrustedProxyModule,
   ],
 })
