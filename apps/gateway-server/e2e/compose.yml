@@ -125,3 +125,74 @@ services:
         condition: service_healthy
     ports:
       - "8080"
+
+  # PR 11 resilience variants: all three trust the docker-bridge
+  # subnets so saturation tests can spoof X-Forwarded-For to mint
+  # distinct memory-bucket keys without sharing state with other
+  # tests' rate-limit buckets.
+
+  # Memory cap=2, fail-open: third distinct key saturates the store
+  # and the policy lets the request through (still 200).
+  gateway-server-mem-open:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    environment:
+      NATS_URLS: nats://nats:4222
+      KV_BUCKET: handler_registry
+      HTTP_ADDR: ":8080"
+      LOG_FORMAT: console
+      LOG_LEVEL: info
+      ENVIRONMENT: e2e
+      TRUSTED_PROXIES: "172.16.0.0/12,192.168.0.0/16"
+      RATELIMIT_FAIL_POLICY: "open"
+      RATELIMIT_MEMORY_MAX_ENTRIES: "2"
+    depends_on:
+      example-app:
+        condition: service_healthy
+    ports:
+      - "8080"
+
+  # Memory cap=2, fail-closed: third distinct key short-circuits to
+  # 503 instead of being allowed through.
+  gateway-server-mem-closed:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    environment:
+      NATS_URLS: nats://nats:4222
+      KV_BUCKET: handler_registry
+      HTTP_ADDR: ":8080"
+      LOG_FORMAT: console
+      LOG_LEVEL: info
+      ENVIRONMENT: e2e
+      TRUSTED_PROXIES: "172.16.0.0/12,192.168.0.0/16"
+      RATELIMIT_FAIL_POLICY: "closed"
+      RATELIMIT_MEMORY_MAX_ENTRIES: "2"
+    depends_on:
+      example-app:
+        condition: service_healthy
+    ports:
+      - "8080"
+
+  # HTTP_MAX_CONCURRENT_REQUESTS=1: a second concurrent request hits
+  # the bounded-semaphore middleware and rejects with 503 +
+  # Retry-After: 1 before any handler runs.
+  gateway-server-conc:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    environment:
+      NATS_URLS: nats://nats:4222
+      KV_BUCKET: handler_registry
+      HTTP_ADDR: ":8080"
+      LOG_FORMAT: console
+      LOG_LEVEL: info
+      ENVIRONMENT: e2e
+      TRUSTED_PROXIES: "172.16.0.0/12,192.168.0.0/16"
+      HTTP_MAX_CONCURRENT_REQUESTS: "1"
+    depends_on:
+      example-app:
+        condition: service_healthy
+    ports:
+      - "8080"

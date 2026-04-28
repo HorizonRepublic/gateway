@@ -48,12 +48,15 @@ var (
 // handler_registry KV. natsURL is consumed by NATSConn for tests that
 // mutate KV directly (PR 8 onwards).
 type liveStack struct {
-	compose            compose.ComposeStack
-	gatewayURL         string
-	gatewayURLB        string
-	gatewayURLRealIP   string
-	gatewayURLNoTrust  string
-	natsURL            string
+	compose             compose.ComposeStack
+	gatewayURL          string
+	gatewayURLB         string
+	gatewayURLRealIP    string
+	gatewayURLNoTrust   string
+	gatewayURLMemOpen   string
+	gatewayURLMemClosed string
+	gatewayURLConc      string
+	natsURL             string
 }
 
 // startStack brings the Compose stack up exactly once per test process.
@@ -87,6 +90,18 @@ func startStack(ctx context.Context) (*liveStack, error) {
 	if err != nil {
 		return nil, err
 	}
+	urlMemOpen, err := resolveGatewayURL(ctx, c, "gateway-server-mem-open")
+	if err != nil {
+		return nil, err
+	}
+	urlMemClosed, err := resolveGatewayURL(ctx, c, "gateway-server-mem-closed")
+	if err != nil {
+		return nil, err
+	}
+	urlConc, err := resolveGatewayURL(ctx, c, "gateway-server-conc")
+	if err != nil {
+		return nil, err
+	}
 
 	natsURL, err := resolveNATSURL(ctx, c)
 	if err != nil {
@@ -94,12 +109,15 @@ func startStack(ctx context.Context) (*liveStack, error) {
 	}
 
 	return &liveStack{
-		compose:           c,
-		gatewayURL:        urlA,
-		gatewayURLB:       urlB,
-		gatewayURLRealIP:  urlRealIP,
-		gatewayURLNoTrust: urlNoTrust,
-		natsURL:           natsURL,
+		compose:             c,
+		gatewayURL:          urlA,
+		gatewayURLB:         urlB,
+		gatewayURLRealIP:    urlRealIP,
+		gatewayURLNoTrust:   urlNoTrust,
+		gatewayURLMemOpen:   urlMemOpen,
+		gatewayURLMemClosed: urlMemClosed,
+		gatewayURLConc:      urlConc,
+		natsURL:             natsURL,
 	}, nil
 }
 
@@ -195,6 +213,109 @@ func GatewayURLRealIP(t *testing.T) string {
 // spoofs are ignored.
 func GatewayURLNoTrust(t *testing.T) string {
 	return resolve(t).gatewayURLNoTrust
+}
+
+// GatewayURLMemOpen returns the host-resolved URL of the resilience
+// replica with `RATELIMIT_FAIL_POLICY=open` and a tiny memory cap
+// (`RATELIMIT_MEMORY_MAX_ENTRIES=2`). PR 11 saturation tests use this
+// to verify a saturated bucket key is allowed through.
+func GatewayURLMemOpen(t *testing.T) string {
+	return resolve(t).gatewayURLMemOpen
+}
+
+// GatewayURLMemClosed returns the host-resolved URL of the resilience
+// replica with `RATELIMIT_FAIL_POLICY=closed` and the same memory cap.
+// PR 11 saturation tests use this to verify a saturated bucket key is
+// short-circuited to 503.
+func GatewayURLMemClosed(t *testing.T) string {
+	return resolve(t).gatewayURLMemClosed
+}
+
+// GatewayURLConc returns the host-resolved URL of the resilience
+// replica with `HTTP_MAX_CONCURRENT_REQUESTS=1`. PR 11 concurrency
+// limit tests use this to verify the bounded-semaphore middleware
+// rejects a second concurrent request with 503 + Retry-After: 1.
+func GatewayURLConc(t *testing.T) string {
+	return resolve(t).gatewayURLConc
+}
+
+// natsContainerStopTimeout bounds how long testcontainers waits for
+// the nats process to exit gracefully before sending SIGKILL.
+const natsContainerStopTimeout = 5 * time.Second
+
+// StopNATS stops the nats Compose service so the NATS-restart test
+// can observe the gateway's behaviour while the bus is unreachable.
+// Pair with StartNATS to bring it back. Tests MUST poll
+// WaitForGatewayHealthy before issuing further requests after a
+// restart — JetStream cold-load + jetstream client reconnect can take
+// several seconds.
+func StopNATS(t *testing.T) {
+	t.Helper()
+	ctx := context.Background()
+	stack := resolve(t)
+	c, err := stack.compose.ServiceContainer(ctx, "nats")
+	require.NoError(t, err, "resolve nats container")
+	stopCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	timeout := natsContainerStopTimeout
+	require.NoError(t, c.Stop(stopCtx, &timeout), "stop nats container")
+}
+
+// StartNATS restarts the nats Compose service. Idempotent: calling on
+// a running container is tolerated by testcontainers.
+func StartNATS(t *testing.T) {
+	t.Helper()
+	ctx := context.Background()
+	stack := resolve(t)
+	c, err := stack.compose.ServiceContainer(ctx, "nats")
+	require.NoError(t, err, "resolve nats container")
+	startCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	require.NoError(t, c.Start(startCtx), "start nats container")
+}
+
+// gatewayHealthyTimeout is the wall-clock ceiling for full
+// end-to-end recovery after a NATS disruption. Generous because the
+// chain is: nats container start → JetStream stream/KV reload →
+// nestjs-jetstream reconnect → handler_registry republish via
+// metadata heartbeat → gateway-server watcher delta → request serves.
+const gatewayHealthyTimeout = 60 * time.Second
+
+// gatewayHealthyInterval is the cadence at which WaitForGatewayHealthy
+// polls a /users/alice probe. Wide enough to avoid hammering during a
+// reconnect storm; narrow enough that recovery is observed promptly.
+const gatewayHealthyInterval = 250 * time.Millisecond
+
+// WaitForGatewayHealthy polls `GET /users/alice` against the supplied
+// gateway URL until it returns 200 or `gatewayHealthyTimeout`
+// elapses. Used by the NATS-restart test to gate downstream work on
+// full reconnect, since /readyz only proves the local HTTP listener
+// is up — it does NOT prove the upstream NATS request path works.
+func WaitForGatewayHealthy(t *testing.T, baseURL string) {
+	t.Helper()
+	deadline := time.Now().Add(gatewayHealthyTimeout)
+	client := &http.Client{Timeout: 3 * time.Second}
+	url := baseURL + "/users/alice"
+
+	var lastStatus int
+	var lastErr error
+	for {
+		resp, err := client.Get(url)
+		if err == nil {
+			lastStatus = resp.StatusCode
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				return
+			}
+		} else {
+			lastErr = err
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("WaitForGatewayHealthy(%s): last status=%d, last err=%v after %s",
+				baseURL, lastStatus, lastErr, gatewayHealthyTimeout)
+		}
+		time.Sleep(gatewayHealthyInterval)
+	}
 }
 
 // WaitReady blocks until the primary gateway accepts a GET on /readyz

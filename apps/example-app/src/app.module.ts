@@ -8,6 +8,7 @@ import { ContractModule } from './features/contract/contract.module';
 import { CoreModule } from './features/core/core.module';
 import { RateLimitModule } from './features/ratelimit/ratelimit.module';
 import { ReloadModule } from './features/reload/reload.module';
+import { ResilienceModule } from './features/resilience/resilience.module';
 import { ResponseModule } from './features/response/response.module';
 import { SecurityModule } from './features/security/security.module';
 import { TrustedProxyModule } from './features/trustedproxy/trustedproxy.module';
@@ -43,6 +44,7 @@ import { HealthModule } from './health/health.module';
     ContractModule,
     RateLimitModule,
     ReloadModule,
+    ResilienceModule,
     SecurityModule,
     TrustedProxyModule,
   ],
