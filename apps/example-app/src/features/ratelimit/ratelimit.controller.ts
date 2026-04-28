@@ -36,4 +36,14 @@ export class RateLimitController {
   public byUser(@GatewayUser() claims: IClaims): { sub: string } {
     return { sub: claims.sub };
   }
+
+  @GatewayRoute({
+    method: 'GET',
+    path: '/rl/multi-natskv',
+    pattern: 'rl.multi.natskv',
+    rateLimit: { rps: 1, burst: 1, store: 'nats-kv' },
+  })
+  public multiNatsKV(): { ok: boolean } {
+    return { ok: true };
+  }
 }
