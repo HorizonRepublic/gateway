@@ -41,10 +41,45 @@ describe(assertRateLimitConfig.name, () => {
             burst: 100,
             keyBy: ['user:sub', 'header:x-api-key', 'ip'],
             store: 'nats-kv',
+            failPolicy: 'closed',
           },
           context,
         );
       }).not.toThrow();
+    });
+
+    it('accepts each legal failPolicy value and its absence', () => {
+      for (const failPolicy of ['open', 'closed', undefined] as const) {
+        expect(() => {
+          assertRateLimitConfig(
+            failPolicy === undefined ? { rps: 10 } : { rps: 10, failPolicy },
+            context,
+          );
+        }).not.toThrow();
+      }
+    });
+  });
+
+  describe('error cases — failPolicy invariants', () => {
+    it.each(['OPEN', 'Closed', '', 'garbage'])('rejects %j', (failPolicy) => {
+      expect(() => {
+        assertRateLimitConfig({ rps: 10, failPolicy: failPolicy as 'open' | 'closed' }, context);
+      }).toThrow(/rateLimit\.failPolicy must be 'open' or 'closed'/);
+    });
+
+    it('includes the caller context in the failPolicy error message', () => {
+      expect(() => {
+        assertRateLimitConfig(
+          { rps: 10, failPolicy: 'garbage' as unknown as 'open' },
+          'GatewayModule.forRoot',
+        );
+      }).toThrow(/Source: GatewayModule\.forRoot\./);
+    });
+
+    it('mentions the omit-field escape hatch in the failPolicy error', () => {
+      expect(() => {
+        assertRateLimitConfig({ rps: 10, failPolicy: 'garbage' as unknown as 'open' }, context);
+      }).toThrow(/Omit failPolicy to inherit the gateway-wide policy/);
     });
   });
 

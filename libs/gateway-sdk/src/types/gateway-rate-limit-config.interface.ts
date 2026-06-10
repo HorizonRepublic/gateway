@@ -91,4 +91,17 @@ export interface IGatewayRateLimitConfig {
    * each value and the per-route coexistence model.
    */
   readonly store?: RateLimitStore;
+
+  /**
+   * Per-route behaviour when the rate-limit store itself fails (network
+   * error, circuit breaker open, saturation): `'open'` allows the request
+   * through, `'closed'` rejects it with 503.
+   * @remarks
+   * Omit to inherit the gateway-wide `RATELIMIT_FAIL_POLICY` default.
+   * A non-empty value overrides the gateway-wide policy for this route
+   * only — declare `'closed'` on endpoints that must never admit
+   * unbounded traffic (payments, mutation-heavy APIs) while the rest of
+   * the gateway stays availability-first.
+   */
+  readonly failPolicy?: 'open' | 'closed';
 }
