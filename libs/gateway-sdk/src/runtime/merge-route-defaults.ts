@@ -1,8 +1,9 @@
 import type { IGatewayDefaults } from '../types';
 
 /**
- * Merge module-level defaults with per-route metadata. Called by
- * `GatewayMetadataEnricher` at module init time.
+ * Merge module-level defaults with per-route metadata. Called by the
+ * lazy `meta` getter composed by `@GatewayRoute` whenever the metadata
+ * is read against a new defaults snapshot.
  * @remarks
  * Merge rules:
  *

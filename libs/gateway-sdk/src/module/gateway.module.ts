@@ -1,5 +1,4 @@
 import { Global, Logger, Module, type DynamicModule, type Provider } from '@nestjs/common';
-import { DiscoveryModule } from '@nestjs/core';
 
 import { GatewayExceptionFilter } from '../filters/gateway-exception.filter';
 import { GatewayResponseInterceptor } from '../interceptors/gateway-response.interceptor';
@@ -8,7 +7,7 @@ import { DefaultErrorBodyFactory } from '../normalization/default-error-body.fac
 import { DefaultGatewayReplyBuilder } from '../normalization/default-reply.builder';
 import { DefaultStatusResolver } from '../normalization/default-status.resolver';
 import { assertRateLimitConfig } from '../normalization/rate-limit-validator';
-import { GatewayMetadataEnricher } from '../runtime/gateway-metadata-enricher';
+import { setDefaultsSnapshot } from '../runtime/defaults-snapshot';
 import {
   GATEWAY_DEFAULTS,
   GATEWAY_ERROR_BODY_FACTORY,
@@ -21,6 +20,30 @@ import type {
   IGatewayModuleOptions,
 } from './gateway-module-options.interface';
 import type { IGatewayDefaults } from '../types/gateway-defaults.interface';
+
+/**
+ * Recursively freeze a defaults object, its nested objects, and arrays.
+ * @remarks
+ * A shallow `Object.freeze` is not enough for the defaults snapshot:
+ * `mergeRouteDefaults` copies `cors` / `rateLimit` / `headers` into route
+ * metadata BY REFERENCE, and the lazy `meta` getter memoizes per snapshot
+ * identity. A nested mutation after boot would neither invalidate the
+ * memo nor be visible as a new snapshot — it would silently diverge what
+ * the transport re-serialises to the `handler_registry` KV on heartbeat.
+ * Deep-freezing turns that class of bug into a loud `TypeError` at the
+ * mutation site. Runs once per `forRoot` / factory resolution.
+ */
+const deepFreeze = (value: unknown): void => {
+  if (typeof value !== 'object' || value === null || Object.isFrozen(value)) {
+    return;
+  }
+
+  for (const key of Object.keys(value)) {
+    deepFreeze((value as Record<string, unknown>)[key]);
+  }
+
+  Object.freeze(value);
+};
 
 /**
  * Light cross-field semantic checks on module-level defaults that cannot
@@ -106,8 +129,9 @@ export class GatewayModule {
    *                  the three normalization contracts by passing a class
    *                  reference; the remaining slots use their defaults.
    *                  Pass `defaults` to apply module-level endpoint
-   *                  defaults merged into every `@GatewayRoute` handler at
-   *                  registration time.
+   *                  defaults merged into every `@GatewayRoute` handler's
+   *                  metadata at read time (no lifecycle-hook ordering
+   *                  dependency).
    * @remarks
    * Validation pass over `options.defaults`:
    *
@@ -145,21 +169,26 @@ export class GatewayModule {
       useClass: options.errorBodyFactory ?? DefaultErrorBodyFactory,
     };
 
+    const frozenDefaults = options.defaults ?? {};
+
+    deepFreeze(frozenDefaults);
+
+    setDefaultsSnapshot(frozenDefaults);
+
     const defaultsProvider: Provider = {
       provide: GATEWAY_DEFAULTS,
-      useValue: Object.freeze(options.defaults ?? {}),
+      useValue: frozenDefaults,
     };
 
     return {
       module: GatewayModule,
       global: true,
-      imports: [DiscoveryModule],
+      imports: [],
       providers: [
         defaultsProvider,
         replyBuilderProvider,
         statusResolverProvider,
         errorBodyFactoryProvider,
-        GatewayMetadataEnricher,
         GatewayResponseInterceptor,
         GatewayExceptionFilter,
       ],
@@ -216,7 +245,13 @@ export class GatewayModule {
           validateDefaults(resolved.defaults, new Logger(GatewayModule.name));
         }
 
-        return Object.freeze(resolved.defaults ?? {});
+        const frozenDefaults = resolved.defaults ?? {};
+
+        deepFreeze(frozenDefaults);
+
+        setDefaultsSnapshot(frozenDefaults);
+
+        return frozenDefaults;
       },
       inject: asyncOptions.inject ?? [],
     };
@@ -224,7 +259,7 @@ export class GatewayModule {
     return {
       module: GatewayModule,
       global: true,
-      imports: [DiscoveryModule, ...(asyncOptions.imports ?? [])],
+      imports: [...(asyncOptions.imports ?? [])],
       providers: [
         defaultsProvider,
         {
@@ -239,7 +274,6 @@ export class GatewayModule {
           provide: GATEWAY_ERROR_BODY_FACTORY,
           useClass: DefaultErrorBodyFactory,
         },
-        GatewayMetadataEnricher,
         GatewayResponseInterceptor,
         GatewayExceptionFilter,
       ],

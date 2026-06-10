@@ -6,6 +6,7 @@ import { GatewayModule } from '../../module/gateway.module';
 import { DefaultErrorBodyFactory } from '../../normalization/default-error-body.factory';
 import { DefaultGatewayReplyBuilder } from '../../normalization/default-reply.builder';
 import { DefaultStatusResolver } from '../../normalization/default-status.resolver';
+import { getDefaultsSnapshot, setDefaultsSnapshot } from '../../runtime/defaults-snapshot';
 import {
   GATEWAY_DEFAULTS,
   GATEWAY_ERROR_BODY_FACTORY,
@@ -209,5 +210,80 @@ describe(GatewayModule, () => {
         expect(warnSpy).toHaveBeenCalledTimes(1);
       });
     });
+  });
+});
+
+describe('GatewayModule defaults snapshot install', () => {
+  afterEach(() => {
+    setDefaultsSnapshot({});
+  });
+
+  it('forRoot installs a frozen snapshot synchronously', () => {
+    GatewayModule.forRoot({ defaults: { timeout: 4000 } });
+
+    expect(getDefaultsSnapshot()).toEqual({ timeout: 4000 });
+    expect(Object.isFrozen(getDefaultsSnapshot())).toBe(true);
+  });
+
+  it('forRoot without defaults installs an empty frozen snapshot', () => {
+    GatewayModule.forRoot();
+
+    expect(getDefaultsSnapshot()).toEqual({});
+    expect(Object.isFrozen(getDefaultsSnapshot())).toBe(true);
+  });
+
+  it('forRootAsync installs the snapshot when the factory resolves', async () => {
+    const dyn = GatewayModule.forRootAsync({
+      useFactory: () => ({ defaults: { timeout: 9000 } }),
+    });
+    const provider = findProvider(dyn.providers, GATEWAY_DEFAULTS);
+
+    if (provider === undefined || typeof provider !== 'object' || !('useFactory' in provider)) {
+      throw new Error('defaults factory provider not present');
+    }
+
+    await (provider.useFactory as () => Promise<unknown>)();
+
+    expect(getDefaultsSnapshot()).toEqual({ timeout: 9000 });
+    expect(Object.isFrozen(getDefaultsSnapshot())).toBe(true);
+  });
+});
+
+describe('GatewayModule defaults deep-freeze', () => {
+  afterEach(() => {
+    setDefaultsSnapshot({});
+  });
+
+  it('forRoot freezes nested defaults objects, not only the top level', () => {
+    GatewayModule.forRoot({
+      defaults: {
+        headers: { 'x-a': '1' },
+        cors: { origins: ['https://app.example.com'] },
+        rateLimit: { rps: 100, keyBy: ['ip'] },
+      },
+    });
+
+    const snap = getDefaultsSnapshot();
+
+    expect(Object.isFrozen(snap.headers)).toBe(true);
+    expect(Object.isFrozen(snap.cors)).toBe(true);
+    expect(Object.isFrozen(snap.cors?.origins)).toBe(true);
+    expect(Object.isFrozen(snap.rateLimit)).toBe(true);
+    expect(Object.isFrozen(snap.rateLimit?.keyBy)).toBe(true);
+  });
+
+  it('forRootAsync freezes nested defaults objects at factory resolution', async () => {
+    const dyn = GatewayModule.forRootAsync({
+      useFactory: () => ({ defaults: { headers: { 'x-b': '2' } } }),
+    });
+    const provider = findProvider(dyn.providers, GATEWAY_DEFAULTS);
+
+    if (provider === undefined || typeof provider !== 'object' || !('useFactory' in provider)) {
+      throw new Error('defaults factory provider not present');
+    }
+
+    await (provider.useFactory as () => Promise<unknown>)();
+
+    expect(Object.isFrozen(getDefaultsSnapshot().headers)).toBe(true);
   });
 });

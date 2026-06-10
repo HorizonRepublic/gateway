@@ -1,11 +1,15 @@
 import { applyDecorators, UseFilters, UseInterceptors } from '@nestjs/common';
 import { MessagePattern } from '@nestjs/microservices';
+import { PATTERN_EXTRAS_METADATA } from '@nestjs/microservices/constants';
 
 import { GatewayExceptionFilter } from '../filters/gateway-exception.filter';
 import { GatewayResponseInterceptor } from '../interceptors/gateway-response.interceptor';
 import { assertCorsCredentialsNotWildcard } from '../normalization/cors-validator';
 import { assertRateLimitConfig } from '../normalization/rate-limit-validator';
+import { getDefaultsSnapshot } from '../runtime/defaults-snapshot';
+import { mergeRouteDefaults } from '../runtime/merge-route-defaults';
 
+import type { IGatewayDefaults } from '../types';
 import type { IGatewayHttpMeta } from '../types/gateway-http-meta.interface';
 import type { IGatewayRouteOptions } from '../types/gateway-route-options.interface';
 
@@ -63,10 +67,16 @@ export const normalizeRouteAuth = (
  * @remarks
  * Composes three separate decorations in one call:
  *
- *   1. `@MessagePattern(pattern, { meta: { http } })` — registers the
- *      handler with `nestjs-jetstream` and writes HTTP routing metadata to
- *      the `handler_registry` NATS KV bucket via the existing
- *      `extras.meta` passthrough.
+ *   1. `@MessagePattern(pattern, { meta })` plus a follow-up decorator
+ *      that redefines `extras.meta` as a lazy getter — registers the
+ *      handler with `nestjs-jetstream`; the metadata the transport reads
+ *      (and writes to the `handler_registry` NATS KV bucket) is the
+ *      route's own options merged with `GatewayModule.forRoot` defaults
+ *      at READ time. Read-time merging removes any dependency on
+ *      lifecycle-hook ordering: hybrid apps publish correct metadata on
+ *      a stock bootstrap. The getter memoizes per defaults-snapshot
+ *      identity because the response interceptor re-reads extras on
+ *      every request.
  *
  *   2. `@UseInterceptors(GatewayResponseInterceptor)` — locally attaches
  *      the success-path interceptor, so it fires only for gateway-exposed
@@ -118,16 +128,51 @@ export const GatewayRoute = (options: IGatewayRouteOptions): MethodDecorator => 
 
   const auth = normalizeRouteAuth(options.auth);
 
-  const meta: Record<string, unknown> = { http };
+  const rawMeta: Record<string, unknown> = { http };
 
-  if (auth !== undefined) meta['auth'] = auth;
-  if (options.cors !== undefined) meta['cors'] = options.cors;
-  if (options.rateLimit !== undefined) meta['rateLimit'] = options.rateLimit;
-  if (options.headers !== undefined) meta['headers'] = options.headers;
-  if (options.timeout !== undefined) meta['timeout'] = options.timeout;
+  if (auth !== undefined) rawMeta['auth'] = auth;
+  if (options.cors !== undefined) rawMeta['cors'] = options.cors;
+  if (options.rateLimit !== undefined) rawMeta['rateLimit'] = options.rateLimit;
+  if (options.headers !== undefined) rawMeta['headers'] = options.headers;
+  if (options.timeout !== undefined) rawMeta['timeout'] = options.timeout;
+
+  let cachedMerge: Record<string, unknown> | undefined;
+  let cachedSnapshot: IGatewayDefaults | undefined;
+
+  const readMergedMeta = (): Record<string, unknown> => {
+    const snapshot = getDefaultsSnapshot();
+
+    if (cachedMerge === undefined || cachedSnapshot !== snapshot) {
+      cachedMerge = mergeRouteDefaults(snapshot, rawMeta);
+      cachedSnapshot = snapshot;
+    }
+
+    return cachedMerge;
+  };
+
+  // `MessagePattern` spreads the extras it receives into the stored
+  // metadata object, so a getter on the PASSED object would be evaluated
+  // at decoration time — before `GatewayModule.forRoot` runs in
+  // module-graph import order. The getter must instead be defined on the
+  // object Nest stored, which downstream readers receive by reference.
+  const installLazyMeta: MethodDecorator = (_target, _propertyKey, descriptor) => {
+    const extras = Reflect.getMetadata(PATTERN_EXTRAS_METADATA, descriptor.value as object) as
+      | Record<string, unknown>
+      | undefined;
+
+    if (extras !== undefined) {
+      Object.defineProperty(extras, 'meta', {
+        enumerable: true,
+        get: readMergedMeta,
+      });
+    }
+
+    return descriptor;
+  };
 
   return applyDecorators(
-    MessagePattern(options.pattern, { meta }),
+    MessagePattern(options.pattern, { meta: rawMeta }),
+    installLazyMeta,
     UseInterceptors(GatewayResponseInterceptor),
     UseFilters(GatewayExceptionFilter),
   );
