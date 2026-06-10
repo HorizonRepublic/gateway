@@ -22,6 +22,30 @@ import type {
 import type { IGatewayDefaults } from '../types/gateway-defaults.interface';
 
 /**
+ * Recursively freeze a defaults object, its nested objects, and arrays.
+ * @remarks
+ * A shallow `Object.freeze` is not enough for the defaults snapshot:
+ * `mergeRouteDefaults` copies `cors` / `rateLimit` / `headers` into route
+ * metadata BY REFERENCE, and the lazy `meta` getter memoizes per snapshot
+ * identity. A nested mutation after boot would neither invalidate the
+ * memo nor be visible as a new snapshot — it would silently diverge what
+ * the transport re-serialises to the `handler_registry` KV on heartbeat.
+ * Deep-freezing turns that class of bug into a loud `TypeError` at the
+ * mutation site. Runs once per `forRoot` / factory resolution.
+ */
+const deepFreeze = (value: unknown): void => {
+  if (typeof value !== 'object' || value === null || Object.isFrozen(value)) {
+    return;
+  }
+
+  for (const key of Object.keys(value)) {
+    deepFreeze((value as Record<string, unknown>)[key]);
+  }
+
+  Object.freeze(value);
+};
+
+/**
  * Light cross-field semantic checks on module-level defaults that cannot
  * be expressed by the `IGatewayDefaults` type alone. CORS
  * wildcard+credentials and rps/burst-shape errors throw — these defaults
@@ -145,7 +169,9 @@ export class GatewayModule {
       useClass: options.errorBodyFactory ?? DefaultErrorBodyFactory,
     };
 
-    const frozenDefaults = Object.freeze(options.defaults ?? {});
+    const frozenDefaults = options.defaults ?? {};
+
+    deepFreeze(frozenDefaults);
 
     setDefaultsSnapshot(frozenDefaults);
 
@@ -219,7 +245,9 @@ export class GatewayModule {
           validateDefaults(resolved.defaults, new Logger(GatewayModule.name));
         }
 
-        const frozenDefaults = Object.freeze(resolved.defaults ?? {});
+        const frozenDefaults = resolved.defaults ?? {};
+
+        deepFreeze(frozenDefaults);
 
         setDefaultsSnapshot(frozenDefaults);
 
