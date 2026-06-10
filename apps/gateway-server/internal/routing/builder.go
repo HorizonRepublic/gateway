@@ -198,16 +198,41 @@ func sanitizeCORS(cors *registry.CORSMeta, key string, logger zerolog.Logger) *r
 		return nil
 	}
 
-	if !cors.Credentials || !slices.Contains(cors.Origins, "*") {
-		return cors
+	if cors.Credentials {
+		if slices.Contains(cors.Origins, "*") {
+			logger.Warn().
+				Str("key", key).
+				Strs("origins", cors.Origins).
+				Msg("routing: dropping CORS block that combines origins:[*] with credentials:true (Fetch Living Standard violation)")
+
+			return nil
+		}
+
+		// Per the Fetch standard, a literal "*" in
+		// Access-Control-Allow-Methods / -Headers / -Expose-Headers
+		// counts as a wildcard ONLY for requests without
+		// credentials; with credentials it matches nothing and the
+		// browser fails the request silently. Same fail-closed
+		// posture as the origins rule: drop the block so the
+		// misconfiguration is a WARN at build time, not a
+		// browser-side mystery.
+		for field, list := range map[string][]string{
+			"methods":       cors.Methods,
+			"headers":       cors.Headers,
+			"exposeHeaders": cors.ExposeHeaders,
+		} {
+			if slices.Contains(list, "*") {
+				logger.Warn().
+					Str("key", key).
+					Str("field", field).
+					Msg("routing: dropping CORS block that combines a wildcard list field with credentials:true (matches nothing in browsers)")
+
+				return nil
+			}
+		}
 	}
 
-	logger.Warn().
-		Str("key", key).
-		Strs("origins", cors.Origins).
-		Msg("routing: dropping CORS block that combines origins:[*] with credentials:true (Fetch Living Standard violation)")
-
-	return nil
+	return cors
 }
 
 // corsInjectionField reports the name of the first CORSMeta string

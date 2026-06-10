@@ -612,3 +612,58 @@ func TestCollectRoutes_ResetsUnknownFailPolicyKeepingLimits(t *testing.T) {
 	assert.Equal(t, []string{"ip"}, rl.KeyBy)
 	assert.Equal(t, "memory", rl.Store)
 }
+
+func TestCollectRoutes_DropsCORSWithWildcardListFieldAndCredentials(t *testing.T) {
+	cases := []struct {
+		name string
+		cors *registry.CORSMeta
+	}{
+		{"methods wildcard", &registry.CORSMeta{
+			Origins: []string{"https://app.com"}, Methods: []string{"*"}, Credentials: true,
+		}},
+		{"headers wildcard", &registry.CORSMeta{
+			Origins: []string{"https://app.com"}, Headers: []string{"*"}, Credentials: true,
+		}},
+		{"exposeHeaders wildcard", &registry.CORSMeta{
+			Origins: []string{"https://app.com"}, ExposeHeaders: []string{"*"}, Credentials: true,
+		}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			snapshot := &registry.Snapshot{
+				Entries: map[string]registry.HandlerEntry{
+					"svc.cmd.users.list": {
+						HTTP: &registry.HTTPMeta{Method: "GET", Path: "/users"},
+						CORS: tc.cors,
+					},
+				},
+			}
+
+			routes := CollectRoutes(snapshot, emptyVerifiers(), silentLogger())
+
+			require.Len(t, routes, 1)
+			assert.Nil(t, routes[0].CORS,
+				"literal * in a list field counts as a wildcard only WITHOUT credentials per the Fetch standard; with credentials it silently breaks in every browser — drop the block fail-closed")
+		})
+	}
+}
+
+func TestCollectRoutes_KeepsCORSWildcardListFieldsWithoutCredentials(t *testing.T) {
+	snapshot := &registry.Snapshot{
+		Entries: map[string]registry.HandlerEntry{
+			"svc.cmd.users.list": {
+				HTTP: &registry.HTTPMeta{Method: "GET", Path: "/users"},
+				CORS: &registry.CORSMeta{
+					Origins: []string{"https://app.com"}, Headers: []string{"*"},
+				},
+			},
+		},
+	}
+
+	routes := CollectRoutes(snapshot, emptyVerifiers(), silentLogger())
+
+	require.Len(t, routes, 1)
+	require.NotNil(t, routes[0].CORS,
+		"wildcard list fields are legal without credentials")
+}

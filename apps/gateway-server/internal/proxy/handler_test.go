@@ -1738,8 +1738,12 @@ func TestHandler_CORSResponseOmittedWhenNoOriginHeader(t *testing.T) {
 	assert.JSONEq(t, `{"ok":true}`, string(result.Body))
 	_, hasCORS := result.Headers["Access-Control-Allow-Origin"]
 	assert.False(t, hasCORS, "no CORS headers when Origin header is absent")
-	_, hasVary := result.Headers["Vary"]
-	assert.False(t, hasVary, "no Vary header when Origin header is absent")
+	// Vary: Origin IS expected even without an Origin header: the
+	// route's responses vary by origin, and a shared cache that
+	// stores this variant without the marker would later serve it
+	// to a CORS request (Fetch standard, caching section).
+	assert.Contains(t, result.Headers["Vary"], "Origin",
+		"CORS-configured route must mark every response Vary: Origin")
 }
 
 func TestHandler_PreflightOnRouteWithoutCORSConfig(t *testing.T) {
@@ -2382,4 +2386,163 @@ func TestPreviewClaimsForLog_TruncatesAt256Bytes(t *testing.T) {
 	got := previewClaimsForLog(json.RawMessage(long))
 
 	assert.Len(t, got, 256)
+}
+
+// TestHandler_CORSVaryOriginOnNonMatchingResponses pins the Fetch
+// standard's cache-correctness rule: a route whose CORS policy varies
+// by origin MUST mark every response with Vary: Origin — including
+// responses to requests with a foreign or absent Origin. Without it,
+// a shared cache stores the header-less variant and later serves it
+// to a CORS request, which then fails in the browser (the exact
+// poisoning example in the spec's "CORS protocol and HTTP caches"
+// section).
+func TestHandler_CORSVaryOriginOnNonMatchingResponses(t *testing.T) {
+	cases := []struct {
+		name   string
+		origin string
+	}{
+		{"no origin header", ""},
+		{"foreign origin", "https://evil.example"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			table := &fakeTable{routes: map[string]routing.Route{
+				"GET /users": {
+					Subject: "svc.cmd.users.list", PathTemplate: "/users",
+					Method: "GET",
+					CORS:   &registry.CORSMeta{Origins: []string{"https://app.example.com"}},
+				},
+			}}
+			nats := newFakeNats()
+			nats.reply = []byte(`{"status":200,"headers":{},"body":null}`)
+
+			h := NewHandler(HandlerConfig{
+				Table:   func() routing.Table { return table },
+				Nats:    nats,
+				Encoder: NewDefaultEncoder(),
+				Decoder: NewDefaultDecoder(),
+				Timeout: 30 * time.Second,
+				Logger:  zerolog.Nop(),
+			})
+
+			in := emptyServeInput("GET", "/users")
+			if tc.origin != "" {
+				in.Headers["origin"] = tc.origin
+			}
+
+			result := h.Handle(context.Background(), in)
+
+			require.Equal(t, 200, result.Status)
+			assert.Contains(t, result.Headers["Vary"], "Origin",
+				"allowlist route must mark EVERY response Vary: Origin, not only matching ones")
+			_, hasACAO := result.Headers["Access-Control-Allow-Origin"]
+			assert.False(t, hasACAO,
+				"non-matching origin must not receive ACAO")
+		})
+	}
+}
+
+// TestHandler_CORSVaryMergesWithUpstreamVary pins list-valued Vary
+// semantics: the CORS stamp must APPEND Origin to an upstream-supplied
+// Vary (e.g. Accept-Encoding), not clobber it — both negotiation axes
+// are real for caches.
+func TestHandler_CORSVaryMergesWithUpstreamVary(t *testing.T) {
+	table := &fakeTable{routes: map[string]routing.Route{
+		"GET /users": {
+			Subject: "svc.cmd.users.list", PathTemplate: "/users",
+			Method: "GET",
+			CORS:   &registry.CORSMeta{Origins: []string{"https://app.example.com"}},
+		},
+	}}
+	nats := newFakeNats()
+	nats.reply = []byte(`{"status":200,"headers":{"vary":["Accept-Encoding"]},"body":null}`)
+
+	h := NewHandler(HandlerConfig{
+		Table:   func() routing.Table { return table },
+		Nats:    nats,
+		Encoder: NewDefaultEncoder(),
+		Decoder: NewDefaultDecoder(),
+		Timeout: 30 * time.Second,
+		Logger:  zerolog.Nop(),
+	})
+
+	in := emptyServeInput("GET", "/users")
+	in.Headers["origin"] = "https://app.example.com"
+
+	result := h.Handle(context.Background(), in)
+
+	require.Equal(t, 200, result.Status)
+	joined := strings.Join(result.Headers["Vary"], ", ")
+	assert.Contains(t, joined, "Accept-Encoding", "upstream Vary member must survive")
+	assert.Contains(t, joined, "Origin", "CORS Vary member must be appended")
+}
+
+// TestHandler_PreflightDefaultsACAMToRequestedMethod pins the
+// empty-Methods footgun fix: the gateway already proved the route
+// exists for the requested method (that is how preflight lookup
+// works), so an empty cors.Methods config must default ACAM to the
+// validated ACRM instead of omitting the header — an omitted ACAM
+// makes the browser fail a non-safelisted method even though the
+// gateway would happily serve it.
+func TestHandler_PreflightDefaultsACAMToRequestedMethod(t *testing.T) {
+	table := &fakeTable{routes: map[string]routing.Route{
+		"DELETE /users": {
+			Subject: "svc.cmd.users.delete", PathTemplate: "/users",
+			Method: "DELETE",
+			CORS:   &registry.CORSMeta{Origins: []string{"https://app.example.com"}},
+		},
+	}}
+
+	h := NewHandler(HandlerConfig{
+		Table:   func() routing.Table { return table },
+		Nats:    newFakeNats(),
+		Encoder: NewDefaultEncoder(),
+		Decoder: NewDefaultDecoder(),
+		Timeout: 30 * time.Second,
+		Logger:  zerolog.Nop(),
+	})
+
+	in := emptyServeInput("OPTIONS", "/users")
+	in.Headers["origin"] = "https://app.example.com"
+	in.Headers["access-control-request-method"] = "DELETE"
+
+	result := h.Handle(context.Background(), in)
+
+	require.Equal(t, 204, result.Status)
+	assert.Equal(t, []string{"DELETE"}, result.Headers["Access-Control-Allow-Methods"],
+		"empty cors.Methods must default ACAM to the validated requested method")
+}
+
+// TestHandler_PreflightDeniedPathsCarryVaryOrigin pins that the
+// origin-dependent preflight denial (404) is itself origin-varying
+// content: caching it without Vary: Origin would poison the path for
+// legitimate origins.
+func TestHandler_PreflightDeniedPathsCarryVaryOrigin(t *testing.T) {
+	table := &fakeTable{routes: map[string]routing.Route{
+		"GET /users": {
+			Subject: "svc.cmd.users.list", PathTemplate: "/users",
+			Method: "GET",
+			CORS:   &registry.CORSMeta{Origins: []string{"https://app.example.com"}},
+		},
+	}}
+
+	h := NewHandler(HandlerConfig{
+		Table:   func() routing.Table { return table },
+		Nats:    newFakeNats(),
+		Encoder: NewDefaultEncoder(),
+		Decoder: NewDefaultDecoder(),
+		Timeout: 30 * time.Second,
+		Logger:  zerolog.Nop(),
+	})
+
+	in := emptyServeInput("OPTIONS", "/users")
+	in.Headers["origin"] = "https://evil.example"
+	in.Headers["access-control-request-method"] = "GET"
+
+	result := h.Handle(context.Background(), in)
+
+	require.Equal(t, 404, result.Status)
+	assert.Contains(t, result.Headers["Vary"], "Origin",
+		"origin-dependent preflight denial must be marked Vary: Origin")
 }
