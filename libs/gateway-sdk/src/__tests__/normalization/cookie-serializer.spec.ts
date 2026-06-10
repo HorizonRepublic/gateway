@@ -138,3 +138,118 @@ describe(serializeCookie.name, () => {
     });
   });
 });
+
+describe('serializeCookie — Partitioned Secure policy', () => {
+  let warnSpy: ReturnType<typeof jest.spyOn>;
+
+  beforeEach(() => {
+    resetSameSiteWarnDedupeForTests();
+    warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+  });
+
+  afterEach(() => {
+    warnSpy.mockRestore();
+  });
+
+  it('auto-promotes Secure when partitioned is set without secure', () => {
+    const result = serializeCookie('sid', 'v', { partitioned: true });
+
+    expect(result).toContain('; Secure');
+    expect(result).toContain('; Partitioned');
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('honours explicit secure:false with a loud warning (browser will ignore the cookie)', () => {
+    const result = serializeCookie('sid', 'v', { partitioned: true, secure: false });
+
+    expect(result).not.toContain('; Secure');
+    expect(result).toContain('; Partitioned');
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('takes no action and emits no warning when secure is already true', () => {
+    const result = serializeCookie('sid', 'v', { partitioned: true, secure: true });
+
+    expect(result).toContain('; Secure');
+    expect(result).toContain('; Partitioned');
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('serializeCookie — cookie name prefixes', () => {
+  let warnSpy: ReturnType<typeof jest.spyOn>;
+
+  beforeEach(() => {
+    resetSameSiteWarnDedupeForTests();
+    warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+  });
+
+  afterEach(() => {
+    warnSpy.mockRestore();
+  });
+
+  it('__Host- auto-fills Secure and Path=/ when absent', () => {
+    const result = serializeCookie('__Host-sid', 'v');
+
+    expect(result).toBe('__Host-sid=v; Path=/; Secure');
+  });
+
+  it('__Host- with a Domain attribute emits a loud warning (UA rejects the cookie)', () => {
+    serializeCookie('__Host-sid', 'v', { domain: '.example.com' });
+
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(String(warnSpy.mock.calls[0]?.[0])).toContain('__Host-');
+  });
+
+  it('__Host- with an explicit non-root Path emits a loud warning', () => {
+    serializeCookie('__Host-sid', 'v', { path: '/api' });
+
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('__Secure- auto-promotes Secure when absent', () => {
+    const result = serializeCookie('__Secure-sid', 'v');
+
+    expect(result).toBe('__Secure-sid=v; Secure');
+  });
+
+  it('detects prefixes case-insensitively (UA validation is case-insensitive per rfc6265bis §5.4)', () => {
+    const result = serializeCookie('__HOST-sid', 'v');
+
+    expect(result).toBe('__HOST-sid=v; Path=/; Secure');
+  });
+});
+
+describe('serializeCookie — name token encoding', () => {
+  it('percent-encodes parentheses in cookie names (not legal token octets)', () => {
+    expect(serializeCookie('a(b)', 'v')).toBe('a%28b%29=v');
+  });
+});
+
+describe('serializeCookie — size awareness', () => {
+  let warnSpy: ReturnType<typeof jest.spyOn>;
+
+  beforeEach(() => {
+    resetSameSiteWarnDedupeForTests();
+    warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+  });
+
+  afterEach(() => {
+    warnSpy.mockRestore();
+  });
+
+  it('warns once when name+value exceed the 4096-octet UA ignore threshold', () => {
+    const big = 'x'.repeat(5000);
+
+    serializeCookie('big', big);
+    serializeCookie('big', big);
+
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not warn below the threshold', () => {
+    serializeCookie('ok', 'x'.repeat(100));
+
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+});

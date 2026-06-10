@@ -60,10 +60,16 @@ export interface ICookieOptions {
    * site.
    * @remarks
    * Chrome 118+ requires `Partitioned` on third-party cookies used in
-   * cross-site contexts; without it the cookie is blocked by the third-party
-   * cookie deprecation. Partitioned cookies also require `Secure: true` and
-   * `SameSite: 'none'` to serialize validly — browsers reject the
-   * combination otherwise.
+   * cross-site contexts; without it the cookie is blocked by the
+   * third-party cookie deprecation. Partitioned cookies require
+   * `Secure: true` — browsers ignore the cookie entirely otherwise; the
+   * serializer auto-promotes `secure` when it is left undefined (same
+   * policy as SameSite=None) and loud-warns on an explicit
+   * `secure: false`. No SameSite value is mandated by CHIPS itself.
+   * Standardisation note: CHIPS is browser-shipped but pre-standard —
+   * the original individual draft expired and the active successor is
+   * the httpbis layered-cookies work; the attribute name is stable in
+   * practice.
    */
   readonly partitioned?: boolean;
 }

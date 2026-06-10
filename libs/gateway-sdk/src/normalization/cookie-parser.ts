@@ -17,12 +17,21 @@
  *   - Split on `;`, trim each cookie pair.
  *   - Split each pair on the FIRST `=` — the value may contain `=`
  *     characters (common in base64-encoded session tokens).
- *   - A pair without `=` is treated as a flag cookie with an empty value
- *     (RFC 6265bis draft §5.4).
- *   - Duplicate names resolve to the first occurrence (Express /
- *     `tough-cookie` convention; RFC 6265 leaves it unspecified).
- *   - Values wrapped in double quotes have the quotes stripped per RFC
- *     6265 §4.1.1.
+ *   - A pair without `=` is treated as a flag cookie with an empty value.
+ *     Conscious divergence: rfc6265bis §5.6 reads a no-`=` pair as an
+ *     EMPTY NAME carrying that value, and Express / npm-`cookie` skip
+ *     the pair entirely; the flag-cookie reading is kept because the Go
+ *     gateway's extractor agrees with it — SDK⇄gateway pair consistency
+ *     outweighs either alternative.
+ *   - Duplicate names resolve to the first occurrence. rfc6265bis
+ *     §5.8.3 orders the UA's serialization longest-path-first (older
+ *     creation-time breaking ties) and §4.2.2 tells servers not to rely
+ *     on the order; first-wins therefore reads the most-path-specific
+ *     cookie under conformant UA ordering.
+ *   - Values wrapped in double quotes have the quotes stripped.
+ *     Conscious divergence: rfc6265bis §4.1.1 keeps DQUOTEs as part of
+ *     the value; stripping matches Go `net/http` and the JS ecosystem,
+ *     and the Go gateway strips identically.
  *   - Percent-encoded name / value segments are decoded; malformed percent
  *     sequences fall back to the raw string because `decodeURIComponent`
  *     would otherwise throw and lose the entire parse.

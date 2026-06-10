@@ -120,11 +120,149 @@ const warnSameSiteNonePolicy = (name: string, outcome: SameSiteNoneOutcome): voi
 };
 
 /**
- * Resets the per-name dedupe set used by `warnSameSiteNonePolicy`. Test-only
+ * Resets the per-name dedupe set used by the serializer's warning
+ * policies (SameSite=None, Partitioned, name prefixes, size). Test-only
  * helper exposed for spec isolation; production code never calls this.
  */
 export const resetSameSiteWarnDedupeForTests = (): void => {
   sameSiteNoneInsecureWarned.clear();
+};
+
+/**
+ * `Partitioned` requires `Secure` — the CHIPS algorithm makes a UA
+ * ignore a Partitioned cookie entirely when the secure flag is absent.
+ * Same anti-footgun shape as the SameSite=None policy: auto-promote
+ * when `secure` is undefined (with a one-time WARN), honour an explicit
+ * `secure: false` with a loud WARN (the cookie will never reach a
+ * browser jar). Note CHIPS is browser-shipped (Chrome 118+) but still
+ * pre-standard — an expired individual draft with the WG successor in
+ * `draft-ietf-httpbis-layered-cookies`; the attribute itself rides
+ * along verbatim.
+ */
+const applyPartitionedSecurePolicy = (name: string, merged: ICookieOptions): ICookieOptions => {
+  if (merged.partitioned !== true || merged.secure === true) {
+    return merged;
+  }
+
+  if (merged.secure === false) {
+    warnOnce(
+      `${name}::partitioned-insecure`,
+      `gateway: cookie ${name} ships with Partitioned and explicit Secure=false — ` +
+        `browsers ignore a Partitioned cookie without Secure entirely. Override honoured ` +
+        `for local-dev compatibility, but the cookie will not reach a real browser.`,
+    );
+
+    return merged;
+  }
+
+  warnOnce(
+    `${name}::partitioned-promoted`,
+    `gateway: cookie ${name} with Partitioned auto-promoted to Secure ` +
+      `(production-default policy — browsers ignore Partitioned cookies without Secure).`,
+  );
+
+  return { ...merged, secure: true };
+};
+
+/**
+ * Cookie name prefix rules per rfc6265bis §4.1.3: `__Secure-` requires
+ * Secure; `__Host-` requires Secure + `Path=/` + no Domain. UAs match
+ * the prefixes case-insensitively (§5.4) and silently reject violating
+ * cookies — the silent-drop incident class this serializer's policies
+ * exist to prevent. Absent attributes are auto-filled (Secure, Path);
+ * explicit violations (Secure=false, non-root Path, any Domain) are
+ * honoured with a loud one-time WARN because no conformant browser
+ * will store the result.
+ */
+const applyPrefixPolicy = (name: string, merged: ICookieOptions): ICookieOptions => {
+  const lower = name.toLowerCase();
+  const isHost = lower.startsWith('__host-');
+  const isSecure = lower.startsWith('__secure-');
+
+  if (!isHost && !isSecure) {
+    return merged;
+  }
+
+  let effective = merged;
+
+  if (effective.secure === undefined) {
+    effective = { ...effective, secure: true };
+  }
+
+  if (isHost && effective.path === undefined && effective.domain === undefined) {
+    effective = { ...effective, path: '/' };
+  }
+
+  const violations: string[] = [];
+
+  if (effective.secure === false) {
+    violations.push('Secure=false');
+  }
+
+  if (isHost && effective.domain !== undefined) {
+    violations.push(`Domain=${effective.domain}`);
+  }
+
+  if (isHost && effective.path !== undefined && effective.path !== '/') {
+    violations.push(`Path=${effective.path}`);
+  }
+
+  if (violations.length > 0) {
+    const prefix = isHost ? '__Host-' : '__Secure-';
+
+    warnOnce(
+      `${name}::prefix-violation`,
+      `gateway: cookie ${name} violates the ${prefix} prefix rules (${violations.join(', ')}) — ` +
+        `browsers validate prefixes case-insensitively and will reject this cookie entirely.`,
+    );
+  }
+
+  return effective;
+};
+
+/**
+ * One-time `console.warn` keyed on the same dedupe set as the
+ * SameSite=None policy so every serializer warning shares the
+ * once-per-(name, outcome) contract.
+ */
+const warnOnce = (dedupeKey: string, message: string): void => {
+  if (sameSiteNoneInsecureWarned.has(dedupeKey)) {
+    return;
+  }
+
+  sameSiteNoneInsecureWarned.add(dedupeKey);
+  console.warn(message);
+};
+
+/**
+ * Encode a cookie NAME for the wire. `encodeURIComponent` leaves the
+ * RFC 3986 sub-delims `(` and `)` unencoded, but cookie-name is an
+ * HTTP `token` and parentheses are separators — a name like `a(b)`
+ * would otherwise ship as an illegal token. Values do not need this:
+ * `(` and `)` are legal cookie-octets in a value.
+ */
+const encodeCookieToken = (name: string): string => {
+  const encoded = TOKEN_SAFE.test(name) ? name : encodeURIComponent(name);
+
+  return encoded.replaceAll('(', '%28').replaceAll(')', '%29');
+};
+
+/**
+ * rfc6265bis §5.6: a UA ignores the whole cookie when name + value
+ * exceed 4096 octets. Another silent-drop class — surface it once per
+ * cookie name instead of letting the operator chase a phantom session
+ * bug.
+ */
+const warnOversizedCookie = (name: string, encodedPair: string): void => {
+  if (Buffer.byteLength(encodedPair) <= 4096) {
+    return;
+  }
+
+  warnOnce(
+    `${name}::oversized`,
+    `gateway: cookie ${name} name+value exceed 4096 octets — browsers ignore the ` +
+      `cookie entirely at this size. Move the payload server-side or shrink the value.`,
+  );
 };
 
 /**
@@ -175,12 +313,16 @@ export const serializeCookie = (
   defaults: Partial<ICookieOptions> = {},
 ): string => {
   const initial: ICookieOptions = { ...defaults, ...options };
-  const { effective: merged, outcome } = applySameSiteNoneSecurePolicy(initial);
+  const { effective: afterSameSite, outcome } = applySameSiteNoneSecurePolicy(initial);
 
   warnSameSiteNonePolicy(name, outcome);
 
-  const encodedName = TOKEN_SAFE.test(name) ? name : encodeURIComponent(name);
+  const merged = applyPrefixPolicy(name, applyPartitionedSecurePolicy(name, afterSameSite));
+
+  const encodedName = encodeCookieToken(name);
   const encodedValue = TOKEN_SAFE.test(value) ? value : encodeURIComponent(value);
+
+  warnOversizedCookie(name, `${encodedName}=${encodedValue}`);
 
   let out = `${encodedName}=${encodedValue}`;
 
