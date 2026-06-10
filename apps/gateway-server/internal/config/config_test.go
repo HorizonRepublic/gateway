@@ -369,3 +369,57 @@ func TestLoad_WriteTimeoutStrictlyExceedsRequestTimeout(t *testing.T) {
 	assert.Greater(t, cfg.WriteTimeout, cfg.RequestTimeout,
 		"WriteTimeout must leave slack over RequestTimeout so a 504 can be written before the HTTP write deadline")
 }
+
+func TestLoad_ResilienceDefaults(t *testing.T) {
+	t.Setenv("NATS_URLS", "nats://localhost:4222")
+	t.Setenv("KV_BUCKET", "handler_registry")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+
+	assert.Equal(t, 0, cfg.NATSMaxInflight, "in-flight cap defaults to disabled")
+	assert.Equal(t, 100*time.Millisecond, cfg.NATSInflightQueueTimeout)
+	assert.True(t, cfg.CircuitBreakerEnabled, "breaker defaults ON — fail-closed protection for the 3am operator")
+	assert.Equal(t, uint32(10), cfg.CircuitBreakerFailureThreshold)
+	assert.Equal(t, 10*time.Second, cfg.CircuitBreakerRecoveryTimeout)
+	assert.Equal(t, uint32(1), cfg.CircuitBreakerHalfOpenProbes)
+}
+
+func TestLoad_ResilienceValidation(t *testing.T) {
+	cases := []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{"negative inflight", map[string]string{"NATS_MAX_INFLIGHT": "-1"}, "NATS_MAX_INFLIGHT"},
+		{"zero queue timeout", map[string]string{"NATS_INFLIGHT_QUEUE_TIMEOUT": "0"}, "NATS_INFLIGHT_QUEUE_TIMEOUT"},
+		{"oversized queue timeout", map[string]string{"NATS_INFLIGHT_QUEUE_TIMEOUT": "11s"}, "NATS_INFLIGHT_QUEUE_TIMEOUT"},
+		{"zero failure threshold", map[string]string{"CIRCUIT_BREAKER_FAILURE_THRESHOLD": "0"}, "CIRCUIT_BREAKER_FAILURE_THRESHOLD"},
+		{"zero recovery timeout", map[string]string{"CIRCUIT_BREAKER_RECOVERY_TIMEOUT": "0"}, "CIRCUIT_BREAKER_RECOVERY_TIMEOUT"},
+		{"zero half-open probes", map[string]string{"CIRCUIT_BREAKER_HALF_OPEN_PROBES": "0"}, "CIRCUIT_BREAKER_HALF_OPEN_PROBES"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("NATS_URLS", "nats://localhost:4222")
+			t.Setenv("KV_BUCKET", "handler_registry")
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+
+			_, err := Load()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.want)
+		})
+	}
+}
+
+func TestLoad_BreakerDisabledSkipsBreakerValidation(t *testing.T) {
+	t.Setenv("NATS_URLS", "nats://localhost:4222")
+	t.Setenv("KV_BUCKET", "handler_registry")
+	t.Setenv("CIRCUIT_BREAKER_ENABLED", "false")
+	t.Setenv("CIRCUIT_BREAKER_FAILURE_THRESHOLD", "0")
+
+	_, err := Load()
+	require.NoError(t, err, "breaker knobs are not validated when the breaker is off")
+}
