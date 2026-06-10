@@ -2061,6 +2061,60 @@ func TestHandler_RateLimitFailClosedReturns503OnStoreError(t *testing.T) {
 		"fail-closed reject still has no populated Decision; omit Remaining")
 }
 
+// TestHandler_InvalidJSONBodyRejectedWith400 pins the intake guard:
+// the request envelope is one JSON document, so a non-JSON inbound
+// body (form POST, truncated JSON, raw binary) MUST be rejected at
+// the gateway with 400 — never forwarded to produce an invalid
+// envelope that upstream JSON.parse turns into an opaque 5xx.
+func TestHandler_InvalidJSONBodyRejectedWith400(t *testing.T) {
+	cases := []struct {
+		name string
+		body []byte
+		want int
+	}{
+		{"form-encoded body", []byte("a=1&b=2"), 400},
+		{"truncated JSON", []byte(`{"name":`), 400},
+		{"valid object", []byte(`{"name":"alice"}`), 200},
+		{"valid scalar", []byte(`42`), 200},
+		{"empty body forwarded as null", nil, 200},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			table := &fakeTable{routes: map[string]routing.Route{
+				"POST /users": {
+					Subject: "svc.cmd.users.create", PathTemplate: "/users",
+					Method: "POST",
+				},
+			}}
+			nats := newFakeNats()
+			nats.reply = []byte(`{"status":200,"headers":{},"body":null}`)
+
+			h := NewHandler(HandlerConfig{
+				Table:   func() routing.Table { return table },
+				Nats:    nats,
+				Encoder: NewDefaultEncoder(),
+				Decoder: NewDefaultDecoder(),
+				Timeout: 30 * time.Second,
+				Logger:  zerolog.Nop(),
+			})
+
+			in := emptyServeInput("POST", "/users")
+			in.Body = tc.body
+
+			result := h.Handle(context.Background(), in)
+
+			assert.Equal(t, tc.want, result.Status)
+			if tc.want == 400 {
+				assert.Equal(t, gerrors.BadRequest.Body, result.Body,
+					"400 must use the pre-encoded BadRequest sentinel")
+				assert.Empty(t, nats.requests,
+					"invalid body must never reach the NATS transport")
+			}
+		})
+	}
+}
+
 // TestHandler_RateLimitPerRouteFailPolicyOverridesRouterPolicy pins
 // the per-route wire override: a route-level failPolicy beats the
 // gateway-wide policy in BOTH directions. Closed-on-open is the

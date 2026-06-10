@@ -36,3 +36,12 @@ func Unmarshal(data []byte, v any) error {
 
 	return nil
 }
+
+// Valid reports whether data is a syntactically valid JSON document.
+// Wraps sonic's SIMD-accelerated validator so callers stay decoupled
+// from the underlying implementation. Used by the proxy intake guard:
+// the request envelope is one JSON text, so embedding a non-JSON body
+// would invalidate the whole document for every upstream consumer.
+func Valid(data []byte) bool {
+	return sonic.Valid(data)
+}

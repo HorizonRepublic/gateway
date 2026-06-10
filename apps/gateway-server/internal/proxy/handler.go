@@ -11,6 +11,7 @@ import (
 
 	"github.com/rs/zerolog"
 
+	"github.com/HorizonRepublic/gateway/apps/gateway-server/internal/codec"
 	gerrors "github.com/HorizonRepublic/gateway/apps/gateway-server/internal/errors"
 	"github.com/HorizonRepublic/gateway/apps/gateway-server/internal/ratelimit"
 	"github.com/HorizonRepublic/gateway/apps/gateway-server/internal/routing"
@@ -171,6 +172,18 @@ func (h *Handler) Handle(ctx context.Context, in *ServeInput) *ServeResult {
 	reqLog = reqLog.With().
 		Str("route", route.Method+":"+route.PathTemplate).
 		Logger()
+
+	// Intake guard: the request envelope is one JSON document
+	// (RFC 8259 §2), so a non-JSON inbound body can never be
+	// embedded verbatim — upstream JSON.parse would throw and the
+	// client would see an opaque 5xx indistinguishable from an
+	// outage. Reject with 400 before spending a verifier hop or a
+	// rate-limit store round-trip on a request that cannot be
+	// forwarded. Empty bodies skip the check (encoded as `null`).
+	if len(in.Body) > 0 && !codec.Valid(in.Body) {
+		reqLog.Debug().Msg("proxy: rejecting non-JSON request body")
+		return toServeResult(gerrors.BadRequest)
+	}
 
 	var claims json.RawMessage
 	var authHeaders map[string][]string
