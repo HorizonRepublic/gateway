@@ -109,11 +109,17 @@ type CORSMeta struct {
 }
 
 // RateLimitMeta holds the rate-limiting policy for a route.
+//
+// FailPolicy selects the per-route behaviour when the rate-limit store
+// itself fails: "open" allows, "closed" rejects. Empty inherits the
+// gateway-wide RATELIMIT_FAIL_POLICY default. Any other value is reset
+// to empty (inherit) by the routing builder's sanitisation pass.
 type RateLimitMeta struct {
-	RPS   int      `json:"rps"`
-	Burst int      `json:"burst,omitempty"`
-	KeyBy []string `json:"keyBy,omitempty"`
-	Store string   `json:"store,omitempty"`
+	RPS        int      `json:"rps"`
+	Burst      int      `json:"burst,omitempty"`
+	KeyBy      []string `json:"keyBy,omitempty"`
+	Store      string   `json:"store,omitempty"`
+	FailPolicy string   `json:"failPolicy,omitempty"`
 }
 
 // HandlerEntry is a single deserialized record from the handler_registry
