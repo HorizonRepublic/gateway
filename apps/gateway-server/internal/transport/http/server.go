@@ -137,16 +137,14 @@ func NewServer(
 		withNoDefaultServerHeader(),
 	)
 
-	// Health endpoints register BEFORE the trusted-proxy middleware and
-	// BEFORE the catch-all so probe traffic short-circuits without
-	// touching the proxy handler, the rate-limit gate, or the auth
-	// flow. Kubernetes liveness/readiness probes typically come from
-	// the kubelet on the node loopback — running them through the
-	// trusted-proxy chain would either spurious-trust an internal IP
-	// or spurious-untrust the kubelet. The probe response carries no
-	// payload so cardinality of the access-log path is bounded.
-	h.GET("/healthz", liveHandler())
-	h.GET("/readyz", readyHandler(readiness))
+	// Health endpoints deliberately do NOT register here: probes,
+	// metrics, and every future admin/debug surface live on the
+	// operator listener (NewOperatorServer, OPERATOR_HTTP_ADDR).
+	// Sharing a socket with public client traffic would blur the
+	// trust boundary — kubelet probes would traverse the same
+	// parser, middleware, and connection budget as untrusted
+	// clients, and any future operator endpoint would inherit
+	// public exposure unless it individually mounted auth.
 
 	// Concurrency limit runs FIRST in the middleware chain so a
 	// saturated semaphore short-circuits before the trusted-proxy
@@ -161,6 +159,42 @@ func NewServer(
 	h.Any("/*path", NewHertzAdapter(handler))
 
 	return h, nil
+}
+
+// NewOperatorServer constructs the operator-only Hertz engine: the
+// listener for surfaces that belong to the platform operator, never
+// to public clients — health probes today; metrics scrape, pprof,
+// admin endpoints (e.g. the dynamic IP blocklist) tomorrow. Binding
+// them to a separate port (OPERATOR_HTTP_ADDR, default :8081) keeps
+// the trust boundary structural: in Kubernetes the operator port is
+// reachable by the kubelet and the pod network but is simply never
+// exposed through the public Service/Ingress, so a future operator
+// endpoint is private BY DEFAULT instead of "private if someone
+// remembers to mount auth".
+//
+// The engine is deliberately minimal: no trusted-proxy middleware
+// (probes come from the kubelet, not through the proxy chain), no
+// concurrency limiter (a saturated gateway must still answer probes,
+// or K8s restarts it mid-incident), no body/header guards (probe
+// requests carry no payload). ExitWaitTime mirrors the public server
+// so one SHUTDOWN_TIMEOUT knob governs both drains.
+//
+// Like NewServer, the returned engine is NOT started.
+func NewOperatorServer(
+	cfg *config.Config,
+	readiness ReadinessSignal,
+) *server.Hertz {
+	h := server.Default(
+		server.WithHostPorts(cfg.OperatorHTTPAddr),
+		server.WithExitWaitTime(cfg.ShutdownTimeout),
+		server.WithKeepAlive(true),
+		withNoDefaultServerHeader(),
+	)
+
+	h.GET("/healthz", liveHandler())
+	h.GET("/readyz", readyHandler(readiness))
+
+	return h
 }
 
 // liveHandler answers the K8s liveness probe. Returns 200 OK as long

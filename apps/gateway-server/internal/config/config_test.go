@@ -423,3 +423,17 @@ func TestLoad_BreakerDisabledSkipsBreakerValidation(t *testing.T) {
 	_, err := Load()
 	require.NoError(t, err, "breaker knobs are not validated when the breaker is off")
 }
+
+func TestLoad_OperatorAddrDefaultsAndValidation(t *testing.T) {
+	t.Setenv("NATS_URLS", "nats://localhost:4222")
+	t.Setenv("KV_BUCKET", "handler_registry")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Equal(t, ":8081", cfg.OperatorHTTPAddr, "operator listener defaults to :8081")
+
+	t.Setenv("OPERATOR_HTTP_ADDR", ":8080")
+	_, err = Load()
+	require.Error(t, err, "operator port must never equal the public port")
+	assert.Contains(t, err.Error(), "OPERATOR_HTTP_ADDR")
+}

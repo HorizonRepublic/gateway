@@ -174,6 +174,14 @@ func main() {
 	}()
 	logger.Info().Str("addr", cfg.HTTPAddr).Msg("http server started")
 
+	operatorServer := httptransport.NewOperatorServer(cfg, readinessSignal)
+	go func() {
+		if err := operatorServer.Run(); err != nil {
+			logger.Error().Err(err).Msg("operator http server exited unexpectedly")
+		}
+	}()
+	logger.Info().Str("addr", cfg.OperatorHTTPAddr).Msg("operator http server started (probes)")
+
 	sig := lifecycle.WaitForSignal()
 	logger.Info().Str("signal", sig.String()).Msg("shutdown signal received")
 
@@ -184,12 +192,13 @@ func main() {
 	cancelRetry()
 
 	lifecycle.Drain(lifecycle.Options{
-		HTTP:      httpServer,
-		Watcher:   watcher,
-		RateLimit: rlRouter,
-		NATS:      nc,
-		Timeout:   cfg.ShutdownTimeout,
-		Logger:    logger,
+		HTTP:         httpServer,
+		OperatorHTTP: operatorServer,
+		Watcher:      watcher,
+		RateLimit:    rlRouter,
+		NATS:         nc,
+		Timeout:      cfg.ShutdownTimeout,
+		Logger:       logger,
 	})
 }
 

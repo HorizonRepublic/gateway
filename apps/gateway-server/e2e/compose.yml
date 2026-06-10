@@ -10,6 +10,7 @@ x-gateway-server-base: &gateway-server-base
     NATS_URLS: nats://nats:4222
     KV_BUCKET: handler_registry
     HTTP_ADDR: ":8080"
+    OPERATOR_HTTP_ADDR: ":8081"
     LOG_FORMAT: console
     LOG_LEVEL: info
     ENVIRONMENT: e2e
@@ -68,6 +69,7 @@ services:
     <<: *gateway-server-base
     ports:
       - "8080"
+      - "8081"
 
   # Second replica for PR 7's multi-replica rate-limit tests. Same image,
   # same NATS, same KV bucket. Routes with `store: 'nats-kv'` share TAT
@@ -78,6 +80,7 @@ services:
     <<: *gateway-server-base
     ports:
       - "8080"
+      - "8081"
 
   # PR 9 trusted-proxy variant: same image and trust set as the primary,
   # but TRUSTED_PROXY_HEADER is flipped to X-Real-IP so requests resolve
@@ -92,6 +95,7 @@ services:
       NATS_URLS: nats://nats:4222
       KV_BUCKET: handler_registry
       HTTP_ADDR: ":8080"
+      OPERATOR_HTTP_ADDR: ":8081"
       LOG_FORMAT: console
       LOG_LEVEL: info
       ENVIRONMENT: e2e
@@ -102,6 +106,7 @@ services:
         condition: service_healthy
     ports:
       - "8080"
+      - "8081"
 
   # PR 9 empty-trust variant: TRUSTED_PROXIES="" is the operator-explicit
   # "trust nothing" form. The middleware always returns the peer IP and
@@ -116,6 +121,7 @@ services:
       NATS_URLS: nats://nats:4222
       KV_BUCKET: handler_registry
       HTTP_ADDR: ":8080"
+      OPERATOR_HTTP_ADDR: ":8081"
       LOG_FORMAT: console
       LOG_LEVEL: info
       ENVIRONMENT: e2e
@@ -125,6 +131,7 @@ services:
         condition: service_healthy
     ports:
       - "8080"
+      - "8081"
 
   # PR 11 resilience variants: all three trust the docker-bridge
   # subnets so saturation tests can spoof X-Forwarded-For to mint
@@ -141,6 +148,7 @@ services:
       NATS_URLS: nats://nats:4222
       KV_BUCKET: handler_registry
       HTTP_ADDR: ":8080"
+      OPERATOR_HTTP_ADDR: ":8081"
       LOG_FORMAT: console
       LOG_LEVEL: info
       ENVIRONMENT: e2e
@@ -152,6 +160,7 @@ services:
         condition: service_healthy
     ports:
       - "8080"
+      - "8081"
 
   # HTTP_MAX_CONCURRENT_REQUESTS=1: a second concurrent request hits
   # the bounded-semaphore middleware and rejects with 503 +
@@ -164,6 +173,7 @@ services:
       NATS_URLS: nats://nats:4222
       KV_BUCKET: handler_registry
       HTTP_ADDR: ":8080"
+      OPERATOR_HTTP_ADDR: ":8081"
       LOG_FORMAT: console
       LOG_LEVEL: info
       ENVIRONMENT: e2e
@@ -174,3 +184,4 @@ services:
         condition: service_healthy
     ports:
       - "8080"
+      - "8081"

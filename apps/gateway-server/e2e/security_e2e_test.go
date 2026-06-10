@@ -81,7 +81,7 @@ func TestE2E_Security_MalformedKVEntryDoesNotCrashGateway(t *testing.T) {
 	assert.Equal(t, http.StatusOK, respUsers.StatusCode,
 		"malformed KV entry MUST NOT affect other routes")
 
-	respReady, err := http.Get(GatewayURL(t) + "/readyz")
+	respReady, err := http.Get(OperatorURL(t, "gateway-server") + "/readyz")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = respReady.Body.Close() })
 	assert.Equal(t, http.StatusOK, respReady.StatusCode,
