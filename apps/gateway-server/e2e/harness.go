@@ -437,7 +437,15 @@ const routeReloadInterval = 50 * time.Millisecond
 // the response status before the watcher has reacted would race.
 func WaitForRoute(t *testing.T, method, path string, expectStatus int) *http.Response {
 	t.Helper()
-	url := GatewayURL(t) + path
+	return WaitForRouteAt(t, GatewayURL(t), method, path, expectStatus)
+}
+
+// WaitForRouteAt is WaitForRoute against an explicit replica base URL.
+// The multi-replica reload tests use it to pin that every KV delta
+// lands on EVERY replica's watcher, not just the primary's.
+func WaitForRouteAt(t *testing.T, baseURL, method, path string, expectStatus int) *http.Response {
+	t.Helper()
+	url := baseURL + path
 	deadline := time.Now().Add(routeReloadDeadline)
 	client := &http.Client{Timeout: 2 * time.Second}
 
@@ -454,8 +462,8 @@ func WaitForRoute(t *testing.T, method, path string, expectStatus int) *http.Res
 			_ = resp.Body.Close()
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("WaitForRoute(%s %s, %d): last status %d after %s",
-				method, path, expectStatus, lastStatus, routeReloadDeadline)
+			t.Fatalf("WaitForRouteAt(%s, %s %s, %d): last status %d after %s",
+				baseURL, method, path, expectStatus, lastStatus, routeReloadDeadline)
 		}
 		time.Sleep(routeReloadInterval)
 	}
