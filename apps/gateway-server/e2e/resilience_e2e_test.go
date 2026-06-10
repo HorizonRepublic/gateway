@@ -13,12 +13,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// hitBurstFromIP issues a single GET /rl/burst against baseURL with
-// the spoofed XFF set to ip. Returns the resolved status. Drains the
+// hitPathFromIP issues a single GET path against baseURL with the
+// spoofed XFF set to ip. Returns the resolved status. Drains the
 // body so the connection returns to the keep-alive pool.
-func hitBurstFromIP(t *testing.T, baseURL, ip string) int {
+func hitPathFromIP(t *testing.T, baseURL, path, ip string) int {
 	t.Helper()
-	req, err := http.NewRequest(http.MethodGet, baseURL+"/rl/burst", nil)
+	req, err := http.NewRequest(http.MethodGet, baseURL+path, nil)
 	require.NoError(t, err)
 	req.Header.Set("X-Forwarded-For", ip)
 	resp, err := http.DefaultClient.Do(req)
@@ -27,44 +27,41 @@ func hitBurstFromIP(t *testing.T, baseURL, ip string) int {
 	return resp.StatusCode
 }
 
-func TestE2E_Resilience_MemoryStoreSaturation_FailOpen(t *testing.T) {
+// TestE2E_Resilience_MemoryStoreSaturation_PerRouteFailPolicy pins
+// both fail-policy branches AND the route-over-env precedence on ONE
+// replica (gateway-wide RATELIMIT_FAIL_POLICY=open, memory cap 2):
+//
+//  1. Two distinct IPs on /rl/burst create two buckets — cap full.
+//  2. A third fresh IP on /rl/burst hits ErrMemoryStoreSaturated;
+//     the route declares no failPolicy, inherits env open ⇒ 200.
+//  3. A fresh IP on /rl/burst-closed (per-route failPolicy: closed)
+//     hits the same saturation ⇒ 503 — the route-level value beats
+//     the availability-first env default.
+//
+// The previous shape proved the two branches via two replicas with
+// opposite env values; per-route wiring makes the contrast expressible
+// in route metadata, which is the actual operator-facing contract.
+func TestE2E_Resilience_MemoryStoreSaturation_PerRouteFailPolicy(t *testing.T) {
 	WaitReadyAt(t, GatewayURLMemOpen(t))
 
-	// Cap is 2. First two distinct IPs each create a fresh bucket
-	// (cap fills). The third tries to admit a new key, hits
-	// ErrMemoryStoreSaturated, and the fail-open policy lets it
-	// through — surface status MUST be 200.
 	const ipA = "10.99.20.1"
 	const ipB = "10.99.20.2"
 	const ipC = "10.99.20.3"
+	const ipD = "10.99.20.4"
 
-	require.Equal(t, http.StatusOK, hitBurstFromIP(t, GatewayURLMemOpen(t), ipA),
+	require.Equal(t, http.StatusOK, hitPathFromIP(t, GatewayURLMemOpen(t), "/rl/burst", ipA),
 		"first IP must succeed (bucket A created)")
-	require.Equal(t, http.StatusOK, hitBurstFromIP(t, GatewayURLMemOpen(t), ipB),
+	require.Equal(t, http.StatusOK, hitPathFromIP(t, GatewayURLMemOpen(t), "/rl/burst", ipB),
 		"second IP must succeed (bucket B created, cap reached)")
 
-	// The third IP would create a NEW bucket; the cap is already at
-	// 2 so admission fails ⇒ saturation ⇒ fail-open ⇒ 200.
-	got := hitBurstFromIP(t, GatewayURLMemOpen(t), ipC)
-	assert.Equal(t, http.StatusOK, got,
-		"saturated key under fail-open MUST be allowed through; got %d", got)
-}
+	gotOpen := hitPathFromIP(t, GatewayURLMemOpen(t), "/rl/burst", ipC)
+	assert.Equal(t, http.StatusOK, gotOpen,
+		"saturated key on the inherit-env route MUST be allowed (env open); got %d", gotOpen)
 
-func TestE2E_Resilience_MemoryStoreSaturation_FailClosed(t *testing.T) {
-	WaitReadyAt(t, GatewayURLMemClosed(t))
-
-	const ipA = "10.99.21.1"
-	const ipB = "10.99.21.2"
-	const ipC = "10.99.21.3"
-
-	require.Equal(t, http.StatusOK, hitBurstFromIP(t, GatewayURLMemClosed(t), ipA),
-		"first IP must succeed (bucket A created)")
-	require.Equal(t, http.StatusOK, hitBurstFromIP(t, GatewayURLMemClosed(t), ipB),
-		"second IP must succeed (bucket B created, cap reached)")
-
-	got := hitBurstFromIP(t, GatewayURLMemClosed(t), ipC)
-	assert.Equal(t, http.StatusServiceUnavailable, got,
-		"saturated key under fail-closed MUST short-circuit to 503; got %d", got)
+	gotClosed := hitPathFromIP(t, GatewayURLMemOpen(t), "/rl/burst-closed", ipD)
+	assert.Equal(t, http.StatusServiceUnavailable, gotClosed,
+		"saturated key under per-route failPolicy=closed MUST short-circuit to 503 "+
+			"even though the gateway-wide policy is open; got %d", gotClosed)
 }
 
 func TestE2E_Resilience_ConcurrencyLimitReturns503(t *testing.T) {

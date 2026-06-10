@@ -54,7 +54,6 @@ type liveStack struct {
 	gatewayURLRealIP    string
 	gatewayURLNoTrust   string
 	gatewayURLMemOpen   string
-	gatewayURLMemClosed string
 	gatewayURLConc      string
 	natsURL             string
 }
@@ -94,10 +93,6 @@ func startStack(ctx context.Context) (*liveStack, error) {
 	if err != nil {
 		return nil, err
 	}
-	urlMemClosed, err := resolveGatewayURL(ctx, c, "gateway-server-mem-closed")
-	if err != nil {
-		return nil, err
-	}
 	urlConc, err := resolveGatewayURL(ctx, c, "gateway-server-conc")
 	if err != nil {
 		return nil, err
@@ -115,7 +110,6 @@ func startStack(ctx context.Context) (*liveStack, error) {
 		gatewayURLRealIP:    urlRealIP,
 		gatewayURLNoTrust:   urlNoTrust,
 		gatewayURLMemOpen:   urlMemOpen,
-		gatewayURLMemClosed: urlMemClosed,
 		gatewayURLConc:      urlConc,
 		natsURL:             natsURL,
 	}, nil
@@ -217,18 +211,12 @@ func GatewayURLNoTrust(t *testing.T) string {
 
 // GatewayURLMemOpen returns the host-resolved URL of the resilience
 // replica with `RATELIMIT_FAIL_POLICY=open` and a tiny memory cap
-// (`RATELIMIT_MEMORY_MAX_ENTRIES=2`). PR 11 saturation tests use this
-// to verify a saturated bucket key is allowed through.
+// (`RATELIMIT_MEMORY_MAX_ENTRIES=2`). The saturation test drives both
+// fail-policy branches against this single replica: the inherit-env
+// route stays open while the per-route `failPolicy: closed` route
+// short-circuits to 503.
 func GatewayURLMemOpen(t *testing.T) string {
 	return resolve(t).gatewayURLMemOpen
-}
-
-// GatewayURLMemClosed returns the host-resolved URL of the resilience
-// replica with `RATELIMIT_FAIL_POLICY=closed` and the same memory cap.
-// PR 11 saturation tests use this to verify a saturated bucket key is
-// short-circuited to 503.
-func GatewayURLMemClosed(t *testing.T) string {
-	return resolve(t).gatewayURLMemClosed
 }
 
 // GatewayURLConc returns the host-resolved URL of the resilience
