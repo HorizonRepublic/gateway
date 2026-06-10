@@ -6,6 +6,7 @@ import { GatewayExceptionFilter } from '../filters/gateway-exception.filter';
 import { GatewayResponseInterceptor } from '../interceptors/gateway-response.interceptor';
 import { assertCorsCredentialsNotWildcard } from '../normalization/cors-validator';
 import { assertRateLimitConfig } from '../normalization/rate-limit-validator';
+import { assertRouteWireShape } from '../normalization/route-shape-validator';
 import { getDefaultsSnapshot } from '../runtime/defaults-snapshot';
 import { mergeRouteDefaults } from '../runtime/merge-route-defaults';
 
@@ -114,6 +115,7 @@ export const normalizeRouteAuth = (
 export const GatewayRoute = (options: IGatewayRouteOptions): MethodDecorator => {
   const source = `@GatewayRoute(${options.method} ${options.path})`;
 
+  assertRouteWireShape(options, source);
   assertCorsCredentialsNotWildcard(options.cors, source);
   assertRateLimitConfig(options.rateLimit, source);
 
