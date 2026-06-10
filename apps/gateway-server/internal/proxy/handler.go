@@ -343,6 +343,19 @@ func (h *Handler) handlePreflight(table routing.Table, in *ServeInput) *ServeRes
 // store call. Without ctx propagation a 30s NATS-KV stall would
 // outlive a client that gave up after 1s — leaking goroutine and
 // connection budget for nothing.
+// failPolicyFor resolves the fail policy for one route: a non-empty
+// route-level value (already sanitised by the routing builder to
+// open/closed) overrides the gateway-wide policy; empty inherits it.
+// Resolve returns zero-size policy values, so the per-request call is
+// allocation-free.
+func (h *Handler) failPolicyFor(route routing.Route) ratelimit.Policy {
+	if route.RateLimit != nil && route.RateLimit.FailPolicy != "" {
+		return ratelimit.FailPolicy(route.RateLimit.FailPolicy).Resolve()
+	}
+
+	return h.cfg.RateLimiter.FailPolicy()
+}
+
 func (h *Handler) applyRateLimitGate(
 	ctx context.Context,
 	route routing.Route,
@@ -381,7 +394,7 @@ func (h *Handler) applyRateLimitGate(
 				Msg("ratelimit: verifier claims failed to unmarshal; routing through FailPolicy")
 		}
 
-		allowed := h.cfg.RateLimiter.FailPolicy().Apply(claimsErr, route, rlKey, reqLog)
+		allowed := h.failPolicyFor(route).Apply(claimsErr, route, rlKey, reqLog)
 
 		rlHeaders := ratelimit.BuildHeaders(route.RateLimit, ratelimit.Decision{})
 		if !allowed {
@@ -430,7 +443,7 @@ func (h *Handler) applyRateLimitGate(
 		// the unpopulated Decision verbatim) leaked Remaining: 0 /
 		// Reset: -62135596800 to clients on the fail-open branch.
 		decision = ratelimit.Decision{}
-		allowed = h.cfg.RateLimiter.FailPolicy().Apply(rlErr, route, fullKey, reqLog)
+		allowed = h.failPolicyFor(route).Apply(rlErr, route, fullKey, reqLog)
 	}
 
 	rlHeaders := ratelimit.BuildHeaders(route.RateLimit, decision)

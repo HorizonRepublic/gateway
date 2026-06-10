@@ -2061,6 +2061,58 @@ func TestHandler_RateLimitFailClosedReturns503OnStoreError(t *testing.T) {
 		"fail-closed reject still has no populated Decision; omit Remaining")
 }
 
+// TestHandler_RateLimitPerRouteFailPolicyOverridesRouterPolicy pins
+// the per-route wire override: a route-level failPolicy beats the
+// gateway-wide policy in BOTH directions. Closed-on-open is the
+// safety-critical direction (a payments route must reject during a
+// store outage even on an availability-first gateway); open-on-closed
+// is the symmetric escape hatch. An empty field inherits the router
+// policy — that branch is pinned by the two tests above.
+func TestHandler_RateLimitPerRouteFailPolicyOverridesRouterPolicy(t *testing.T) {
+	cases := []struct {
+		name         string
+		routerPolicy ratelimit.FailPolicy
+		routePolicy  string
+		wantStatus   int
+	}{
+		{"route closed beats router open", ratelimit.FailPolicyOpen, "closed", 503},
+		{"route open beats router closed", ratelimit.FailPolicyClosed, "open", 200},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rl := &erroringRateLimiter{err: errors.New("backend offline")}
+			table := &fakeTable{routes: map[string]routing.Route{
+				"GET /users": {
+					Subject: "svc.cmd.users.list", PathTemplate: "/users",
+					Method:    "GET",
+					RateLimit: &registry.RateLimitMeta{RPS: 10, Burst: 20, FailPolicy: tc.routePolicy},
+				},
+			}}
+			nats := newFakeNats()
+			nats.reply = []byte(`{"status":200,"headers":{},"body":null}`)
+
+			h := NewHandler(HandlerConfig{
+				Table:       func() routing.Table { return table },
+				Nats:        nats,
+				Encoder:     NewDefaultEncoder(),
+				Decoder:     NewDefaultDecoder(),
+				Timeout:     30 * time.Second,
+				Logger:      zerolog.Nop(),
+				RateLimiter: routerWithStoreAndPolicy(t, rl, tc.routerPolicy),
+			})
+
+			in := emptyServeInput("GET", "/users")
+			in.RemoteAddr = "1.2.3.4"
+
+			result := h.Handle(context.Background(), in)
+
+			assert.Equal(t, tc.wantStatus, result.Status,
+				"route-level failPolicy must override the router-wide policy")
+		})
+	}
+}
+
 // TestHandler_ClaimsUnmarshalFailsClosedReturns503 pins the
 // multi-tenant safety contract: when the verifier replies with
 // non-JSON-object claims, a route configured with

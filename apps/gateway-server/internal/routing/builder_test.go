@@ -555,3 +555,60 @@ func TestCollectRoutes_DropsRateLimitWithNegativeBurst(t *testing.T) {
 	assert.Nil(t, routes[0].RateLimit,
 		"routing builder must drop a negative-burst block; GCRA.Check is undefined on negative burst")
 }
+
+func TestCollectRoutes_KeepsValidFailPolicy(t *testing.T) {
+	cases := []struct {
+		name   string
+		policy string
+	}{
+		{"open", "open"},
+		{"closed", "closed"},
+		{"empty inherits env", ""},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			snapshot := &registry.Snapshot{
+				Entries: map[string]registry.HandlerEntry{
+					"svc.cmd.users.list": {
+						HTTP:      &registry.HTTPMeta{Method: "GET", Path: "/users"},
+						RateLimit: &registry.RateLimitMeta{RPS: 10, FailPolicy: tc.policy},
+					},
+				},
+			}
+
+			routes := CollectRoutes(snapshot, emptyVerifiers(), silentLogger())
+
+			require.Len(t, routes, 1)
+			require.NotNil(t, routes[0].RateLimit)
+			assert.Equal(t, tc.policy, routes[0].RateLimit.FailPolicy,
+				"valid failPolicy values must thread through the sanitizer verbatim")
+		})
+	}
+}
+
+func TestCollectRoutes_ResetsUnknownFailPolicyKeepingLimits(t *testing.T) {
+	snapshot := &registry.Snapshot{
+		Entries: map[string]registry.HandlerEntry{
+			"svc.cmd.users.list": {
+				HTTP: &registry.HTTPMeta{Method: "GET", Path: "/users"},
+				RateLimit: &registry.RateLimitMeta{
+					RPS: 10, Burst: 20, KeyBy: []string{"ip"}, Store: "memory", FailPolicy: "garbage",
+				},
+			},
+		},
+	}
+
+	routes := CollectRoutes(snapshot, emptyVerifiers(), silentLogger())
+
+	require.Len(t, routes, 1)
+	rl := routes[0].RateLimit
+	require.NotNil(t, rl,
+		"an unknown failPolicy must not take the whole rate-limit block down — the limits are valid")
+	assert.Equal(t, "", rl.FailPolicy,
+		"unknown failPolicy resets to empty so the route inherits the gateway-wide policy")
+	assert.Equal(t, 10, rl.RPS)
+	assert.Equal(t, 20, rl.Burst)
+	assert.Equal(t, []string{"ip"}, rl.KeyBy)
+	assert.Equal(t, "memory", rl.Store)
+}

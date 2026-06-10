@@ -279,6 +279,19 @@ func sanitizeRateLimit(rl *registry.RateLimitMeta, key string, logger zerolog.Lo
 		return nil
 	}
 
+	// An unknown failPolicy resets the FIELD only — the limits are
+	// valid and dropping the whole block would disable enforcement
+	// because of one bad enum value. Empty inherits the gateway-wide
+	// policy, which is the documented behaviour for an absent field.
+	if rl.FailPolicy != "" && rl.FailPolicy != "open" && rl.FailPolicy != "closed" {
+		logger.Warn().
+			Str("key", key).
+			Str("failPolicy", rl.FailPolicy).
+			Msg("routing: resetting unknown rate-limit failPolicy to inherit (SDK validation bypassed)")
+
+		rl.FailPolicy = ""
+	}
+
 	return rl
 }
 

@@ -224,6 +224,28 @@ func TestRateLimitMeta_JSONRoundTripWithStore(t *testing.T) {
 	assert.Equal(t, in, out)
 }
 
+func TestRateLimitMeta_JSONRoundTripWithFailPolicy(t *testing.T) {
+	in := RateLimitMeta{RPS: 10, FailPolicy: "closed"}
+	raw, err := json.Marshal(in)
+	require.NoError(t, err)
+	assert.Contains(t, string(raw), `"failPolicy":"closed"`)
+
+	var out RateLimitMeta
+	require.NoError(t, json.Unmarshal(raw, &out))
+	assert.Equal(t, in, out)
+}
+
+func TestRateLimitMeta_JSONRoundTripWithoutFailPolicy(t *testing.T) {
+	in := RateLimitMeta{RPS: 10}
+	raw, err := json.Marshal(in)
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), `"failPolicy"`)
+
+	var out RateLimitMeta
+	require.NoError(t, json.Unmarshal(raw, &out))
+	assert.Equal(t, "", out.FailPolicy)
+}
+
 func TestRateLimitMeta_JSONRoundTripWithoutStore(t *testing.T) {
 	in := RateLimitMeta{RPS: 10}
 	raw, err := json.Marshal(in)
