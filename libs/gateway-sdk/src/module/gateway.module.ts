@@ -1,5 +1,4 @@
 import { Global, Logger, Module, type DynamicModule, type Provider } from '@nestjs/common';
-import { DiscoveryModule } from '@nestjs/core';
 
 import { GatewayExceptionFilter } from '../filters/gateway-exception.filter';
 import { GatewayResponseInterceptor } from '../interceptors/gateway-response.interceptor';
@@ -8,7 +7,7 @@ import { DefaultErrorBodyFactory } from '../normalization/default-error-body.fac
 import { DefaultGatewayReplyBuilder } from '../normalization/default-reply.builder';
 import { DefaultStatusResolver } from '../normalization/default-status.resolver';
 import { assertRateLimitConfig } from '../normalization/rate-limit-validator';
-import { GatewayMetadataEnricher } from '../runtime/gateway-metadata-enricher';
+import { setDefaultsSnapshot } from '../runtime/defaults-snapshot';
 import {
   GATEWAY_DEFAULTS,
   GATEWAY_ERROR_BODY_FACTORY,
@@ -106,8 +105,9 @@ export class GatewayModule {
    *                  the three normalization contracts by passing a class
    *                  reference; the remaining slots use their defaults.
    *                  Pass `defaults` to apply module-level endpoint
-   *                  defaults merged into every `@GatewayRoute` handler at
-   *                  registration time.
+   *                  defaults merged into every `@GatewayRoute` handler's
+   *                  metadata at read time (no lifecycle-hook ordering
+   *                  dependency).
    * @remarks
    * Validation pass over `options.defaults`:
    *
@@ -145,21 +145,24 @@ export class GatewayModule {
       useClass: options.errorBodyFactory ?? DefaultErrorBodyFactory,
     };
 
+    const frozenDefaults = Object.freeze(options.defaults ?? {});
+
+    setDefaultsSnapshot(frozenDefaults);
+
     const defaultsProvider: Provider = {
       provide: GATEWAY_DEFAULTS,
-      useValue: Object.freeze(options.defaults ?? {}),
+      useValue: frozenDefaults,
     };
 
     return {
       module: GatewayModule,
       global: true,
-      imports: [DiscoveryModule],
+      imports: [],
       providers: [
         defaultsProvider,
         replyBuilderProvider,
         statusResolverProvider,
         errorBodyFactoryProvider,
-        GatewayMetadataEnricher,
         GatewayResponseInterceptor,
         GatewayExceptionFilter,
       ],
@@ -216,7 +219,11 @@ export class GatewayModule {
           validateDefaults(resolved.defaults, new Logger(GatewayModule.name));
         }
 
-        return Object.freeze(resolved.defaults ?? {});
+        const frozenDefaults = Object.freeze(resolved.defaults ?? {});
+
+        setDefaultsSnapshot(frozenDefaults);
+
+        return frozenDefaults;
       },
       inject: asyncOptions.inject ?? [],
     };
@@ -224,7 +231,7 @@ export class GatewayModule {
     return {
       module: GatewayModule,
       global: true,
-      imports: [DiscoveryModule, ...(asyncOptions.imports ?? [])],
+      imports: [...(asyncOptions.imports ?? [])],
       providers: [
         defaultsProvider,
         {
@@ -239,7 +246,6 @@ export class GatewayModule {
           provide: GATEWAY_ERROR_BODY_FACTORY,
           useClass: DefaultErrorBodyFactory,
         },
-        GatewayMetadataEnricher,
         GatewayResponseInterceptor,
         GatewayExceptionFilter,
       ],
