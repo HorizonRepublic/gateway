@@ -68,4 +68,18 @@ export const assertRateLimitConfig = (
       );
     }
   }
+
+  // Widened to string on purpose: the static type already constrains the
+  // value, so this guard only ever fires for inputs that bypassed the
+  // type checker (JS callers, hand-built configs, schema drift).
+  const failPolicy: string | undefined = rateLimit.failPolicy;
+
+  if (failPolicy !== undefined && failPolicy !== 'open' && failPolicy !== 'closed') {
+    throw new Error(
+      `gateway: rateLimit.failPolicy must be 'open' or 'closed'; ` +
+        `got ${String(failPolicy)}. ` +
+        `Omit failPolicy to inherit the gateway-wide policy. ` +
+        `Source: ${context}.`,
+    );
+  }
 };
