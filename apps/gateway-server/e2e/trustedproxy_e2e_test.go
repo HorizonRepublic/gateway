@@ -51,7 +51,7 @@ func TestE2E_TrustedProxy_XFFRightmostUntrusted(t *testing.T) {
 }
 
 func TestE2E_TrustedProxy_XRealIPHonoursAltHeader(t *testing.T) {
-	WaitReadyAt(t, GatewayURLRealIP(t))
+	WaitReadyAt(t, OperatorURL(t, "gateway-server-realip"))
 
 	// Replica with TRUSTED_PROXY_HEADER=X-Real-IP. The peer (docker
 	// bridge) is in the trusted set, so the resolver takes the
@@ -70,7 +70,7 @@ func TestE2E_TrustedProxy_XRealIPHonoursAltHeader(t *testing.T) {
 }
 
 func TestE2E_TrustedProxy_EmptyTrustSetIgnoresXFF(t *testing.T) {
-	WaitReadyAt(t, GatewayURLNoTrust(t))
+	WaitReadyAt(t, OperatorURL(t, "gateway-server-notrust"))
 
 	// Empty trust set ⇒ peer is never trusted ⇒ XFF is always
 	// ignored (the spoofing defence). The resolver returns the peer

@@ -170,6 +170,14 @@ type Config struct {
 	// messages published while the connection is temporarily down.
 	NATSReconnectBufSize int `env:"NATS_RECONNECT_BUFSIZE" envDefault:"8388608"`
 
+	// OperatorHTTPAddr is the bind address of the operator-only
+	// listener: health probes today, metrics/pprof/admin tomorrow.
+	// Operator surfaces never share a socket with public client
+	// traffic — in Kubernetes this port stays off the public
+	// Service/Ingress, so every operator endpoint is private by
+	// construction.
+	OperatorHTTPAddr string `env:"OPERATOR_HTTP_ADDR" envDefault:":8081"`
+
 	// NATSMaxInflight caps concurrent in-flight NATS requests across
 	// the whole gateway process. 0 disables the cap. Bounding
 	// in-flight requests prevents OOM under traffic spikes when the
@@ -356,6 +364,10 @@ func Load() (*Config, error) {
 
 	if cfg.HTTPMaxConcurrentRequests < 0 {
 		return nil, fmt.Errorf("HTTP_MAX_CONCURRENT_REQUESTS must be ≥ 0 (0 disables the cap), got %d", cfg.HTTPMaxConcurrentRequests)
+	}
+
+	if cfg.OperatorHTTPAddr == "" || cfg.OperatorHTTPAddr == cfg.HTTPAddr {
+		return nil, fmt.Errorf("OPERATOR_HTTP_ADDR must be non-empty and differ from HTTP_ADDR (operator surfaces never share the public socket), got %q", cfg.OperatorHTTPAddr)
 	}
 
 	if cfg.NATSMaxInflight < 0 {

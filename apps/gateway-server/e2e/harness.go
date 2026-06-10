@@ -55,6 +55,7 @@ type liveStack struct {
 	gatewayURLNoTrust   string
 	gatewayURLMemOpen   string
 	gatewayURLConc      string
+	operatorURLs        map[string]string
 	natsURL             string
 }
 
@@ -103,6 +104,21 @@ func startStack(ctx context.Context) (*liveStack, error) {
 		return nil, err
 	}
 
+	// Operator-listener URLs (probes) for every gateway service the
+	// suite readiness-gates. Public URLs no longer answer /readyz —
+	// the operator port is the only probe surface.
+	operatorURLs := make(map[string]string)
+	for _, svc := range []string{
+		"gateway-server", "gateway-server-b", "gateway-server-realip",
+		"gateway-server-notrust", "gateway-server-mem-open", "gateway-server-conc",
+	} {
+		u, opErr := resolveOperatorURL(ctx, c, svc)
+		if opErr != nil {
+			return nil, opErr
+		}
+		operatorURLs[svc] = u
+	}
+
 	return &liveStack{
 		compose:             c,
 		gatewayURL:          urlA,
@@ -111,6 +127,7 @@ func startStack(ctx context.Context) (*liveStack, error) {
 		gatewayURLNoTrust:   urlNoTrust,
 		gatewayURLMemOpen:   urlMemOpen,
 		gatewayURLConc:      urlConc,
+		operatorURLs:        operatorURLs,
 		natsURL:             natsURL,
 	}, nil
 }
@@ -140,6 +157,16 @@ func resolveNATSURL(ctx context.Context, c compose.ComposeStack) (string, error)
 // expose port 8080 inside the network and a different ephemeral host
 // port; testcontainers picks each independently.
 func resolveGatewayURL(ctx context.Context, c compose.ComposeStack, service string) (string, error) {
+	return resolveServiceURL(ctx, c, service, "8080/tcp")
+}
+
+// resolveOperatorURL maps a gateway service to its host-visible
+// operator-listener URL (probes; container port 8081).
+func resolveOperatorURL(ctx context.Context, c compose.ComposeStack, service string) (string, error) {
+	return resolveServiceURL(ctx, c, service, "8081/tcp")
+}
+
+func resolveServiceURL(ctx context.Context, c compose.ComposeStack, service, containerPort string) (string, error) {
 	gw, err := c.ServiceContainer(ctx, service)
 	if err != nil {
 		return "", fmt.Errorf("resolve %s container: %w", service, err)
@@ -148,9 +175,9 @@ func resolveGatewayURL(ctx context.Context, c compose.ComposeStack, service stri
 	if err != nil {
 		return "", fmt.Errorf("%s host: %w", service, err)
 	}
-	port, err := gw.MappedPort(ctx, "8080/tcp")
+	port, err := gw.MappedPort(ctx, containerPort)
 	if err != nil {
-		return "", fmt.Errorf("%s port: %w", service, err)
+		return "", fmt.Errorf("%s port %s: %w", service, containerPort, err)
 	}
 	return fmt.Sprintf("http://%s:%s", host, port.Port()), nil
 }
@@ -309,14 +336,14 @@ func WaitForGatewayHealthy(t *testing.T, baseURL string) {
 // WaitReady blocks until the primary gateway accepts a GET on /readyz
 // and returns 200. Times out after readyTimeout.
 func WaitReady(t *testing.T) {
-	waitReadyAt(t, GatewayURL(t))
+	waitReadyAt(t, OperatorURL(t, "gateway-server"))
 }
 
 // WaitReadyB blocks until the second gateway replica accepts a GET on
 // /readyz and returns 200. Multi-replica tests call WaitReadyB after
 // WaitReady so both replicas are confirmed live before traffic splits.
 func WaitReadyB(t *testing.T) {
-	waitReadyAt(t, GatewayURLB(t))
+	waitReadyAt(t, OperatorURL(t, "gateway-server-b"))
 }
 
 // WaitReadyAt polls /readyz on the supplied base URL until it returns
@@ -324,6 +351,17 @@ func WaitReadyB(t *testing.T) {
 // gate on the realip / notrust replicas without growing one
 // WaitReadyX helper per replica.
 func WaitReadyAt(t *testing.T, baseURL string) { waitReadyAt(t, baseURL) }
+
+// OperatorURL returns the host-resolved operator-listener URL
+// (probes) for the named gateway compose service.
+func OperatorURL(t *testing.T, service string) string {
+	t.Helper()
+	u, ok := resolve(t).operatorURLs[service]
+	if !ok {
+		t.Fatalf("no operator URL resolved for service %q", service)
+	}
+	return u
+}
 
 // waitReadyAt polls /readyz on the supplied base URL until it returns
 // 200 or the readyTimeout elapses.

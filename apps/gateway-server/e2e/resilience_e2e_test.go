@@ -42,7 +42,7 @@ func hitPathFromIP(t *testing.T, baseURL, path, ip string) int {
 // opposite env values; per-route wiring makes the contrast expressible
 // in route metadata, which is the actual operator-facing contract.
 func TestE2E_Resilience_MemoryStoreSaturation_PerRouteFailPolicy(t *testing.T) {
-	WaitReadyAt(t, GatewayURLMemOpen(t))
+	WaitReadyAt(t, OperatorURL(t, "gateway-server-mem-open"))
 
 	const ipA = "10.99.20.1"
 	const ipB = "10.99.20.2"
@@ -65,7 +65,7 @@ func TestE2E_Resilience_MemoryStoreSaturation_PerRouteFailPolicy(t *testing.T) {
 }
 
 func TestE2E_Resilience_ConcurrencyLimitReturns503(t *testing.T) {
-	WaitReadyAt(t, GatewayURLConc(t))
+	WaitReadyAt(t, OperatorURL(t, "gateway-server-conc"))
 
 	// Replica caps in-flight requests at 1. The handler sleeps
 	// 500ms, so the second request races the bounded semaphore

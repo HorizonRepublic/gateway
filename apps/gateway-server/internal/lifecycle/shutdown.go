@@ -102,6 +102,10 @@ type Options struct {
 	// HTTP is the HTTP server instance whose Shutdown method blocks
 	// on in-flight request completion.
 	HTTP HTTPServer
+	// OperatorHTTP is the operator-only listener (probes, future
+	// metrics/admin). Drained LAST so /readyz stays observable for
+	// the kubelet during the public drain. Nil disables the step.
+	OperatorHTTP HTTPServer
 	// Watcher is the registry watcher whose Stop method cancels its
 	// background goroutine.
 	Watcher WatcherStopper
@@ -186,6 +190,7 @@ func Drain(opts Options) {
 	stopWatcher(opts)
 	closeRateLimitRouter(opts)
 	drainNATS(ctx, opts)
+	shutdownOperatorHTTP(ctx, opts)
 
 	opts.Logger.Info().
 		Dur("elapsed", time.Since(overallStart)).
@@ -210,6 +215,29 @@ func shutdownHTTP(ctx context.Context, opts Options) {
 	opts.Logger.Info().
 		Dur("elapsed", time.Since(start)).
 		Msg("shutdown step: http complete")
+}
+
+// shutdownOperatorHTTP drains the operator-only listener. Runs as
+// the FINAL step so health probes answer truthfully for as long as
+// the process holds any other resource — a kubelet that loses
+// /readyz mid-drain would mark the pod failed while in-flight
+// requests are still completing. Nil-safe.
+func shutdownOperatorHTTP(ctx context.Context, opts Options) {
+	if opts.OperatorHTTP == nil {
+		return
+	}
+	opts.Logger.Debug().Msg("shutdown step: operator http")
+	start := time.Now()
+	if err := opts.OperatorHTTP.Shutdown(ctx); err != nil {
+		opts.Logger.Error().
+			Err(err).
+			Dur("elapsed", time.Since(start)).
+			Msg("operator http shutdown failed")
+		return
+	}
+	opts.Logger.Info().
+		Dur("elapsed", time.Since(start)).
+		Msg("shutdown step: operator http complete")
 }
 
 // stopWatcher cancels the registry watcher's background goroutine.

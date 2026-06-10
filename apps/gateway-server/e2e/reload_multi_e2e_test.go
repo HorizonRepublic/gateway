@@ -29,7 +29,7 @@ func drainAndClose(resp *http.Response) {
 // keeps the bucket clean for neighbours.
 func TestE2E_ReloadMulti_DeltasLandOnBothReplicas(t *testing.T) {
 	WaitReady(t)
-	WaitReadyAt(t, GatewayURLB(t))
+	WaitReadyB(t)
 
 	const pathNew = "/__reload/multi-new"
 	const pathV2 = "/__reload/multi-v2"
