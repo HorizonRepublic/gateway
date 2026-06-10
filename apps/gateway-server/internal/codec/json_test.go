@@ -1,6 +1,7 @@
 package codec
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -50,4 +51,25 @@ func TestMarshal_ReturnsFreshSliceEachCall(t *testing.T) {
 		secondHeader := &second[0]
 		assert.NotSame(t, firstHeader, secondHeader, "Marshal must return independently-allocated slices")
 	}
+}
+
+// TestUnmarshal_SanitisesInvalidUTF8 pins the trust-boundary contract:
+// JSON arriving from NATS (upstream replies, KV entries) may come from
+// non-SDK publishers. RFC 8259 §8.1 makes UTF-8 a MUST for
+// inter-system exchange; a decoder that passes invalid bytes through
+// verbatim would forward them to public HTTP clients under
+// application/json. The decode path must sanitise invalid sequences
+// to U+FFFD exactly like encoding/json does.
+func TestUnmarshal_SanitisesInvalidUTF8(t *testing.T) {
+	raw := []byte("{\"v\":\"a\x80b\"}")
+
+	var stdGot map[string]string
+	require.NoError(t, json.Unmarshal(raw, &stdGot), "encoding/json accepts and sanitises")
+
+	var got map[string]string
+	require.NoError(t, Unmarshal(raw, &got))
+
+	assert.Equal(t, stdGot["v"], got["v"],
+		"codec.Unmarshal must match encoding/json's U+FFFD sanitisation")
+	assert.Equal(t, "a�b", got["v"])
 }

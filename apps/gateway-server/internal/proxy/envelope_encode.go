@@ -38,7 +38,10 @@ package proxy
 //   - QueryValue.Single variant → JSON string; Multi variant → JSON
 //     array of strings, always, even for single-element slices.
 
-import "strconv"
+import (
+	"strconv"
+	"unicode/utf8"
+)
 
 // appendEnvelopeJSON appends the JSON-encoded form of envelope onto
 // buf and returns the grown slice. Cannot fail: every field of
@@ -181,10 +184,17 @@ func appendQueryValue(buf []byte, v QueryValue) []byte {
 
 // appendJSONString appends a JSON string literal (including the
 // surrounding quotes) onto buf per RFC 8259 §7. Control characters
-// below 0x20, the backslash, and the double-quote are escaped; every
-// other byte — including DEL (0x7F) and multi-byte UTF-8 sequences
-// — passes through verbatim. This exactly mirrors encoding/json's
-// behavior and the test suite certifies the byte-for-byte parity.
+// below 0x20, the backslash, and the double-quote are escaped; DEL
+// (0x7F) and valid multi-byte UTF-8 sequences pass through verbatim;
+// every byte that is not part of a valid UTF-8 encoding is replaced
+// with the six-character `�` escape — RFC 8259 §8.1 makes UTF-8
+// a MUST for
+// inter-system exchange, and raw invalid bytes would otherwise be
+// silently mangled by the SDK side's non-fatal TextDecoder. This
+// mirrors encoding/json's behavior (with HTML escaping disabled —
+// `<`, `>`, `&`, U+2028/U+2029 pass through raw, which is valid JSON)
+// and the test suite certifies the parity, including the invalid
+// UTF-8 replacement cases.
 //
 // The inner loop walks a run of "safe" bytes and flushes them with a
 // single append — mirroring encoding/json.encodeString — so the
@@ -197,32 +207,50 @@ func appendQueryValue(buf []byte, v QueryValue) []byte {
 func appendJSONString(buf []byte, s string) []byte {
 	buf = append(buf, '"')
 	start := 0
-	for i := 0; i < len(s); i++ {
+	for i := 0; i < len(s); {
 		c := s[i]
-		if c >= 0x20 && c != '"' && c != '\\' {
+		if c < utf8.RuneSelf {
+			if c >= 0x20 && c != '"' && c != '\\' {
+				i++
+				continue
+			}
+			buf = append(buf, s[start:i]...)
+			switch c {
+			case '"':
+				buf = append(buf, '\\', '"')
+			case '\\':
+				buf = append(buf, '\\', '\\')
+			case '\n':
+				buf = append(buf, '\\', 'n')
+			case '\r':
+				buf = append(buf, '\\', 'r')
+			case '\t':
+				buf = append(buf, '\\', 't')
+			case '\b':
+				buf = append(buf, '\\', 'b')
+			case '\f':
+				buf = append(buf, '\\', 'f')
+			default:
+				const hex = "0123456789abcdef"
+				buf = append(buf, '\\', 'u', '0', '0', hex[c>>4], hex[c&0x0F])
+			}
+			i++
+			start = i
 			continue
 		}
-		buf = append(buf, s[start:i]...)
-		switch c {
-		case '"':
-			buf = append(buf, '\\', '"')
-		case '\\':
-			buf = append(buf, '\\', '\\')
-		case '\n':
-			buf = append(buf, '\\', 'n')
-		case '\r':
-			buf = append(buf, '\\', 'r')
-		case '\t':
-			buf = append(buf, '\\', 't')
-		case '\b':
-			buf = append(buf, '\\', 'b')
-		case '\f':
-			buf = append(buf, '\\', 'f')
-		default:
-			const hex = "0123456789abcdef"
-			buf = append(buf, '\\', 'u', '0', '0', hex[c>>4], hex[c&0x0F])
+
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r == utf8.RuneError && size == 1 {
+			// Invalid UTF-8 byte: replace with the escape form so
+			// the envelope stays a legal RFC 8259 §8.1 document
+			// instead of being silently mangled downstream.
+			buf = append(buf, s[start:i]...)
+			buf = append(buf, '\\', 'u', 'f', 'f', 'f', 'd')
+			i++
+			start = i
+			continue
 		}
-		start = i + 1
+		i += size
 	}
 	buf = append(buf, s[start:]...)
 	buf = append(buf, '"')

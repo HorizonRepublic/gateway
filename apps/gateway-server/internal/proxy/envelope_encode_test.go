@@ -43,6 +43,10 @@ func TestAppendJSONString_MatchesStdlib(t *testing.T) {
 		{"cyrillic", "привіт"},
 		{"emoji", "hi 👋"},
 		{"long run", longRun},
+		{"invalid utf-8 lone continuation byte", "a\x80b"},
+		{"invalid utf-8 truncated multibyte tail", "a\xc3"},
+		{"invalid utf-8 0xff 0xfe pair", "\xff\xfe"},
+		{"invalid utf-8 between valid runes", "ok\x80привіт\xc3ok"},
 	}
 
 	for _, tc := range cases {
