@@ -122,6 +122,16 @@ func buildServeInput(ctx *app.RequestContext) *proxy.ServeInput {
 			return
 		}
 
+		// The gateway never honours an inbound X-Request-Id: the
+		// gateway-generated `meta.requestId` is the only trusted
+		// correlator. Forwarding the client-supplied header would
+		// hand upstream handlers a spoofable id one key away from
+		// the authoritative one — strip it like the credential
+		// headers on the verifier path.
+		if lowerKey == "x-request-id" {
+			return
+		}
+
 		v := string(value)
 		if existing, ok := headers[lowerKey]; ok {
 			headers[lowerKey] = existing + headerJoinSeparator(lowerKey) + v

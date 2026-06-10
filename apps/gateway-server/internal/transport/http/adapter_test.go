@@ -407,3 +407,45 @@ func TestWriteServeResult_LeavesHandlerThrownErrorsUntouched(t *testing.T) {
 	// Handler-owned Cache-Control stays intact.
 	assert.Equal(t, "private, max-age=60", string(ctx.Response.Header.Peek("Cache-Control")))
 }
+
+// TestBuildServeInput_StripsSpoofableInboundRequestID pins the
+// single-correlator-plane contract: the gateway NEVER honours an
+// inbound X-Request-Id — `meta.requestId` (gateway-generated ULID) is
+// the only trusted correlator. Forwarding the client-supplied header
+// alongside it would hand upstream handlers a spoofable id one key
+// away from the authoritative one.
+func TestBuildServeInput_StripsSpoofableInboundRequestID(t *testing.T) {
+	ctx := ut.CreateUtRequestContext("GET", "https://gateway.test/x", nil,
+		ut.Header{Key: "X-Request-Id", Value: "client-forged-id"},
+		ut.Header{Key: "X-Custom", Value: "kept"},
+	)
+
+	input := buildServeInput(ctx)
+
+	assert.NotContains(t, input.Headers, "x-request-id",
+		"client-supplied X-Request-Id must not reach the upstream header map")
+	assert.Equal(t, "kept", input.Headers["x-custom"])
+	assert.NotEqual(t, "client-forged-id", input.RequestID,
+		"meta correlator stays gateway-generated")
+	assert.NotEmpty(t, input.RequestID)
+}
+
+// TestBuildServeInput_TracestatePassesThrough turns the previously
+// ACCIDENTAL tracestate propagation into a pinned contract: W3C Trace
+// Context §3.4 requires a pass-through participant to forward
+// traceparent AND tracestate together unchanged. traceparent is
+// first-class in the envelope meta; tracestate rides the generic
+// header map — this test is what keeps a future header-filtering
+// change from silently dropping vendor sampling state.
+func TestBuildServeInput_TracestatePassesThrough(t *testing.T) {
+	ctx := ut.CreateUtRequestContext("GET", "https://gateway.test/x", nil,
+		ut.Header{Key: "traceparent", Value: "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"},
+		ut.Header{Key: "tracestate", Value: "vendor=opaque,other=value"},
+	)
+
+	input := buildServeInput(ctx)
+
+	assert.Equal(t, "vendor=opaque,other=value", input.Headers["tracestate"],
+		"tracestate must survive into the forwarded header map unchanged")
+	assert.Equal(t, "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01", input.Traceparent)
+}
