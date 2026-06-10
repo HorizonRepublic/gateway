@@ -51,6 +51,7 @@ type HTTPError struct {
 // directly without hard-coding magic numbers, and to make the full
 // set of statuses the gateway may produce obvious at a glance.
 const (
+	StatusBadRequest         = 400
 	StatusTooManyRequests    = 429
 	StatusNotFound           = 404
 	StatusMethodNotAllowed   = 405
@@ -73,6 +74,13 @@ const (
 // phrases already expose), and stays consistent with the SDK-side
 // error shapes produced for handler-thrown HttpException instances.
 var (
+	// BadRequest is the 400 response returned when the inbound
+	// request body is not a valid JSON document. The request
+	// envelope forwarded to upstream handlers is itself one JSON
+	// text (RFC 8259 §2), so a non-JSON body can never be embedded
+	// — rejecting at intake keeps the failure a client-visible 400
+	// instead of an opaque upstream parse error surfacing as 5xx.
+	BadRequest HTTPError
 	// NotFound is the 404 response returned when the routing table
 	// has no match for the requested method+path combination.
 	NotFound HTTPError
@@ -105,6 +113,7 @@ var (
 )
 
 func init() {
+	BadRequest = build(StatusBadRequest, "Bad Request")
 	NotFound = build(StatusNotFound, "Not Found")
 	MethodNotAllowed = build(StatusMethodNotAllowed, "Method Not Allowed")
 	TooManyRequests = build(StatusTooManyRequests, "Too Many Requests")

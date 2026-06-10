@@ -62,6 +62,7 @@ func TestHTTPError_ReasonPhrases(t *testing.T) {
 		err    HTTPError
 		phrase string
 	}{
+		{"BadRequest", BadRequest, "Bad Request"},
 		{"NotFound", NotFound, "Not Found"},
 		{"MethodNotAllowed", MethodNotAllowed, "Method Not Allowed"},
 		{"TooManyRequests", TooManyRequests, "Too Many Requests"},

@@ -24,8 +24,10 @@ package proxy
 //     is safe.
 //   - An empty Body (nil OR zero-length slice) serializes to the
 //     literal "null"; a non-empty json.RawMessage is appended verbatim
-//     with no re-validation (callers are responsible for ensuring it
-//     is valid JSON, which the proxy enforces upstream of the encoder).
+//     with no re-validation. The proxy handler enforces this upstream:
+//     Handle rejects any non-empty body that fails codec.Valid with
+//     400 before the encoder runs, so a non-JSON body can never reach
+//     this append path.
 //     Treating an empty slice the same as nil matters because the HTTP
 //     adapter populates Body from the framework's Request.Body(), which
 //     returns []byte{} (not nil) when the client sent no body — and
