@@ -170,6 +170,36 @@ type Config struct {
 	// messages published while the connection is temporarily down.
 	NATSReconnectBufSize int `env:"NATS_RECONNECT_BUFSIZE" envDefault:"8388608"`
 
+	// NATSMaxInflight caps concurrent in-flight NATS requests across
+	// the whole gateway process. 0 disables the cap. Bounding
+	// in-flight requests prevents OOM under traffic spikes when the
+	// connection's pending buffer saturates and every blocked request
+	// pins a goroutine + envelope buffer. Recommended in production:
+	// 5000–20000, sized to upstream capacity.
+	NATSMaxInflight int `env:"NATS_MAX_INFLIGHT" envDefault:"0"`
+	// NATSInflightQueueTimeout bounds how long a request waits for an
+	// in-flight slot before being shed with 503. Keep well under the
+	// route timeout so saturation degrades into fast 503s, not a
+	// latency cliff.
+	NATSInflightQueueTimeout time.Duration `env:"NATS_INFLIGHT_QUEUE_TIMEOUT" envDefault:"100ms"`
+
+	// CircuitBreakerEnabled wires a circuit breaker around the NATS
+	// request path. During a bus outage the breaker fast-fails with
+	// 503 after CircuitBreakerFailureThreshold consecutive failures
+	// instead of pinning a goroutine per incoming request for the
+	// full timeout.
+	CircuitBreakerEnabled bool `env:"CIRCUIT_BREAKER_ENABLED" envDefault:"true"`
+	// CircuitBreakerFailureThreshold is the consecutive-failure count
+	// that trips the breaker open.
+	CircuitBreakerFailureThreshold uint32 `env:"CIRCUIT_BREAKER_FAILURE_THRESHOLD" envDefault:"10"`
+	// CircuitBreakerRecoveryTimeout is how long the breaker stays
+	// open before admitting half-open probe requests.
+	CircuitBreakerRecoveryTimeout time.Duration `env:"CIRCUIT_BREAKER_RECOVERY_TIMEOUT" envDefault:"10s"`
+	// CircuitBreakerHalfOpenProbes is how many concurrent probe
+	// requests the half-open state admits; collective success closes
+	// the breaker, any failure re-opens it.
+	CircuitBreakerHalfOpenProbes uint32 `env:"CIRCUIT_BREAKER_HALF_OPEN_PROBES" envDefault:"1"`
+
 	// KVBucket is the NATS KV bucket name the gateway watches for
 	// handler registry entries.
 	//
@@ -326,6 +356,28 @@ func Load() (*Config, error) {
 
 	if cfg.HTTPMaxConcurrentRequests < 0 {
 		return nil, fmt.Errorf("HTTP_MAX_CONCURRENT_REQUESTS must be ≥ 0 (0 disables the cap), got %d", cfg.HTTPMaxConcurrentRequests)
+	}
+
+	if cfg.NATSMaxInflight < 0 {
+		return nil, fmt.Errorf("NATS_MAX_INFLIGHT must be ≥ 0 (0 disables the cap), got %d", cfg.NATSMaxInflight)
+	}
+
+	if cfg.NATSInflightQueueTimeout <= 0 || cfg.NATSInflightQueueTimeout > 10*time.Second {
+		return nil, fmt.Errorf("NATS_INFLIGHT_QUEUE_TIMEOUT must be > 0 and ≤ 10s, got %s", cfg.NATSInflightQueueTimeout)
+	}
+
+	if cfg.CircuitBreakerEnabled {
+		if cfg.CircuitBreakerFailureThreshold < 1 {
+			return nil, fmt.Errorf("CIRCUIT_BREAKER_FAILURE_THRESHOLD must be ≥ 1, got %d", cfg.CircuitBreakerFailureThreshold)
+		}
+
+		if cfg.CircuitBreakerRecoveryTimeout <= 0 {
+			return nil, fmt.Errorf("CIRCUIT_BREAKER_RECOVERY_TIMEOUT must be > 0, got %s", cfg.CircuitBreakerRecoveryTimeout)
+		}
+
+		if cfg.CircuitBreakerHalfOpenProbes < 1 {
+			return nil, fmt.Errorf("CIRCUIT_BREAKER_HALF_OPEN_PROBES must be ≥ 1, got %d", cfg.CircuitBreakerHalfOpenProbes)
+		}
 	}
 
 	return cfg, nil

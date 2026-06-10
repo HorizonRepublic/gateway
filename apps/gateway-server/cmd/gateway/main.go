@@ -138,7 +138,15 @@ func main() {
 	startRateLimitRetryLoop(retryCtx, rlRouter, store, cfg, js, logger)
 
 	requester := buildRequesterOrDie(nc, logger)
-	handler := buildProxyHandler(cfg, currentTable, requester, rlRouter, logger)
+	resilient := natstransport.NewResilientRequester(requester, natstransport.ResilientConfig{
+		MaxInflight:      cfg.NATSMaxInflight,
+		QueueTimeout:     cfg.NATSInflightQueueTimeout,
+		BreakerEnabled:   cfg.CircuitBreakerEnabled,
+		FailureThreshold: cfg.CircuitBreakerFailureThreshold,
+		RecoveryTimeout:  cfg.CircuitBreakerRecoveryTimeout,
+		HalfOpenProbes:   cfg.CircuitBreakerHalfOpenProbes,
+	}, logger)
+	handler := buildProxyHandler(cfg, currentTable, resilient, rlRouter, logger)
 	httpServer, err := httptransport.NewServer(
 		cfg,
 		handler,
@@ -371,7 +379,7 @@ func buildRequesterOrDie(nc *natsgo.Conn, logger zerolog.Logger) *natstransport.
 func buildProxyHandler(
 	cfg *config.Config,
 	currentTable *atomic.Value,
-	requester *natstransport.Requester,
+	requester proxy.NatsRequester,
 	rlRouter *ratelimit.Router,
 	logger zerolog.Logger,
 ) *proxy.Handler {
