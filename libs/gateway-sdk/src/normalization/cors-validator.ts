@@ -44,13 +44,33 @@ export const assertCorsCredentialsNotWildcard = (
     return;
   }
 
-  if (!cors.origins.includes('*')) {
-    return;
+  if (cors.origins.includes('*')) {
+    throw new Error(
+      `gateway: cors.credentials: true cannot be combined with cors.origins: '*' ` +
+        `(browsers reject the combination per Fetch Living Standard). ` +
+        `Enumerate explicit origins instead. Source: ${context}.`,
+    );
   }
 
-  throw new Error(
-    `gateway: cors.credentials: true cannot be combined with cors.origins: '*' ` +
-      `(browsers reject the combination per Fetch Living Standard). ` +
-      `Enumerate explicit origins instead. Source: ${context}.`,
-  );
+  // Per the Fetch standard, a literal "*" in the methods / headers /
+  // exposeHeaders lists counts as a wildcard ONLY for requests without
+  // credentials; with credentials it matches nothing and every browser
+  // fails the request silently. Same fail-fast posture as the origins
+  // rule. (The routing builder drops such blocks server-side as
+  // defence-in-depth.)
+  const listFields: readonly (readonly [string, readonly string[] | undefined])[] = [
+    ['methods', cors.methods],
+    ['headers', cors.headers],
+    ['exposeHeaders', cors.exposeHeaders],
+  ];
+
+  for (const [field, list] of listFields) {
+    if (list?.includes('*') === true) {
+      throw new Error(
+        `gateway: cors.credentials: true cannot be combined with cors.${field}: ['*'] ` +
+          `(list-field wildcards match nothing for credentialed requests per the ` +
+          `Fetch Living Standard). Enumerate explicit values instead. Source: ${context}.`,
+      );
+    }
+  }
 };

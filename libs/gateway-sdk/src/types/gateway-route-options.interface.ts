@@ -91,8 +91,11 @@ export interface IGatewayRouteOptions {
   /**
    * Per-route request timeout in milliseconds. Overrides global timeout.
    * @remarks
-   * When omitted, the gateway applies the application-wide timeout. Set to
-   * `0` to disable the timeout for this route entirely.
+   * When omitted, the gateway applies the application-wide timeout. Must be
+   * a positive integer — `timeout: 0` is rejected at decoration time
+   * because the gateway treats a non-positive route timeout as "inherit
+   * the gateway-wide value", never as "no timeout". There is no per-route
+   * disable switch.
    */
   readonly timeout?: number;
 }

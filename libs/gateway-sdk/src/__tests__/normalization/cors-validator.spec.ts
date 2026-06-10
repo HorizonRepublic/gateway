@@ -62,3 +62,26 @@ describe(assertCorsCredentialsNotWildcard.name, () => {
     });
   });
 });
+
+describe('assertCorsCredentialsNotWildcard — list-field wildcards with credentials', () => {
+  it.each(['methods', 'headers', 'exposeHeaders'] as const)(
+    'rejects %s: ["*"] with credentials: true',
+    (field) => {
+      expect(() => {
+        assertCorsCredentialsNotWildcard(
+          { origins: ['https://app.example.com'], credentials: true, [field]: ['*'] },
+          'GatewayModule.forRoot',
+        );
+      }).toThrow(new RegExp(`cors\\.${field}`));
+    },
+  );
+
+  it('accepts list-field wildcards without credentials', () => {
+    expect(() => {
+      assertCorsCredentialsNotWildcard(
+        { origins: ['https://app.example.com'], headers: ['*'] },
+        'GatewayModule.forRoot',
+      );
+    }).not.toThrow();
+  });
+});
