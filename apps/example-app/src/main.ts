@@ -22,17 +22,6 @@ const bootstrap = async (): Promise<void> => {
     logger: ['error', 'warn', 'log'],
   });
 
-  // Hybrid-app lifecycle gotcha: NestJS only fires `onModuleInit` hooks
-  // when `app.listen()` calls `app.init()` internally. In a hybrid app
-  // that pattern means the JetStream strategy publishes handler
-  // metadata to KV inside `startAllMicroservices()` BEFORE the SDK's
-  // GatewayMetadataEnricher gets a chance to merge `forRoot` defaults
-  // into per-route extras. Forcing `app.init()` here drains every
-  // module's lifecycle hooks ahead of microservice startup so the
-  // enriched metadata is what reaches the wire. `init()` is idempotent;
-  // the later `app.listen()` is a no-op for the lifecycle phase.
-  await app.init();
-
   // Microservice runtime: JetstreamStrategy is registered by
   // JetstreamModule.forRoot so we resolve it from the DI graph rather
   // than instantiating it directly (the constructor takes 10+ injected
