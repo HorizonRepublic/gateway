@@ -2546,3 +2546,90 @@ func TestHandler_PreflightDeniedPathsCarryVaryOrigin(t *testing.T) {
 	assert.Contains(t, result.Headers["Vary"], "Origin",
 		"origin-dependent preflight denial must be marked Vary: Origin")
 }
+
+// TestHandler_MainRoute401StampsWWWAuthenticate pins RFC 9110 §15.5.2
+// on the MAIN reply path: when the upstream route handler itself
+// replies 401 (not the verifier), the client-visible response MUST
+// still carry a WWW-Authenticate challenge. The verifier path has had
+// this stamp since the auth port; the route path leaked bare 401s
+// whenever the SDK-side handler omitted the header.
+func TestHandler_MainRoute401StampsWWWAuthenticate(t *testing.T) {
+	cases := []struct {
+		name      string
+		reply     string
+		wantValue string
+	}{
+		{
+			"handler 401 without challenge gets the gateway default",
+			`{"status":401,"headers":{},"body":null}`,
+			`Bearer realm="gateway"`,
+		},
+		{
+			"handler-supplied challenge is forwarded untouched",
+			`{"status":401,"headers":{"www-authenticate":["Bearer error=\"invalid_token\""]},"body":null}`,
+			`Bearer error="invalid_token"`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			table := &fakeTable{routes: map[string]routing.Route{
+				"GET /users": {
+					Subject: "svc.cmd.users.list", PathTemplate: "/users",
+					Method: "GET",
+				},
+			}}
+			nats := newFakeNats()
+			nats.reply = []byte(tc.reply)
+
+			h := NewHandler(HandlerConfig{
+				Table:   func() routing.Table { return table },
+				Nats:    nats,
+				Encoder: NewDefaultEncoder(),
+				Decoder: NewDefaultDecoder(),
+				Timeout: 30 * time.Second,
+				Logger:  zerolog.Nop(),
+			})
+
+			result := h.Handle(context.Background(), emptyServeInput("GET", "/users"))
+
+			require.Equal(t, 401, result.Status)
+			values := append(
+				result.Headers["www-authenticate"],
+				result.Headers["WWW-Authenticate"]...)
+			require.Len(t, values, 1, "exactly one challenge expected")
+			assert.Equal(t, tc.wantValue, values[0])
+		})
+	}
+}
+
+// TestHandler_MainRoute403NotStamped pins the inverse rule: 403 has no
+// mandatory challenge header, and stamping one would mislead clients
+// into re-authenticating when the identity was fine and the permission
+// was not.
+func TestHandler_MainRoute403NotStamped(t *testing.T) {
+	table := &fakeTable{routes: map[string]routing.Route{
+		"GET /users": {
+			Subject: "svc.cmd.users.list", PathTemplate: "/users",
+			Method: "GET",
+		},
+	}}
+	nats := newFakeNats()
+	nats.reply = []byte(`{"status":403,"headers":{},"body":null}`)
+
+	h := NewHandler(HandlerConfig{
+		Table:   func() routing.Table { return table },
+		Nats:    nats,
+		Encoder: NewDefaultEncoder(),
+		Decoder: NewDefaultDecoder(),
+		Timeout: 30 * time.Second,
+		Logger:  zerolog.Nop(),
+	})
+
+	result := h.Handle(context.Background(), emptyServeInput("GET", "/users"))
+
+	require.Equal(t, 403, result.Status)
+	_, lower := result.Headers["www-authenticate"]
+	_, canonical := result.Headers["WWW-Authenticate"]
+	assert.False(t, lower || canonical, "403 must not carry a challenge")
+}

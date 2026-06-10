@@ -274,6 +274,14 @@ func (h *Handler) Handle(ctx context.Context, in *ServeInput) *ServeResult {
 
 	stampResponseCORS(mergedHeaders, route.CORS, in.Headers["origin"])
 
+	// RFC 9110 §15.5.2 binds whoever GENERATES the 401 — on the wire
+	// that is this gateway, regardless of whether the upstream route
+	// handler remembered the challenge header. The verifier path has
+	// carried this stamp since the auth port; without it here, an
+	// SDK-side handler replying a bare 401 leaks a spec-violating
+	// response to the client.
+	stampDefaultWWWAuthenticate(reply.Status, mergedHeaders)
+
 	return &ServeResult{
 		Status:  reply.Status,
 		Headers: mergedHeaders,
@@ -387,7 +395,7 @@ func appendVaryOrigin(headers map[string][]string) {
 // applyRateLimitGate runs the per-route rate-limit check for a
 // request that has already cleared route matching and (if configured)
 // the auth flow. It returns the response headers the caller must
-// stamp onto the eventual reply (RateLimit-Limit, -Remaining, -Reset),
+// stamp onto the eventual reply (X-RateLimit-Limit, -Remaining, -Reset),
 // and a non-nil short-circuit ServeResult when the bucket rejected
 // the request — the caller MUST return that result verbatim without
 // proceeding to the upstream NATS request.
