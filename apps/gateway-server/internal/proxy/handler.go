@@ -14,6 +14,7 @@ import (
 	"github.com/HorizonRepublic/gateway/apps/gateway-server/internal/codec"
 	gerrors "github.com/HorizonRepublic/gateway/apps/gateway-server/internal/errors"
 	"github.com/HorizonRepublic/gateway/apps/gateway-server/internal/ratelimit"
+	"github.com/HorizonRepublic/gateway/apps/gateway-server/internal/registry"
 	"github.com/HorizonRepublic/gateway/apps/gateway-server/internal/routing"
 )
 
@@ -271,14 +272,7 @@ func (h *Handler) Handle(ctx context.Context, in *ServeInput) *ServeResult {
 		}
 	}
 
-	if route.CORS != nil {
-		origin := in.Headers["origin"]
-		if matched := MatchOrigin(route.CORS, origin); matched != "" {
-			for k, v := range BuildResponseCORSHeaders(route.CORS, matched) {
-				mergedHeaders[k] = []string{v}
-			}
-		}
-	}
+	stampResponseCORS(mergedHeaders, route.CORS, in.Headers["origin"])
 
 	return &ServeResult{
 		Status:  reply.Status,
@@ -304,7 +298,14 @@ func (h *Handler) handlePreflight(table routing.Table, in *ServeInput) *ServeRes
 	origin := in.Headers["origin"]
 	matched := MatchOrigin(route.CORS, origin)
 	if matched == "" {
-		return toServeResult(gerrors.NotFound)
+		// The denial is origin-dependent content: a shared cache
+		// storing this 404 without Vary: Origin would serve it to a
+		// legitimate origin's preflight (the poisoning case in the
+		// Fetch standard's caching section).
+		result := toServeResult(gerrors.NotFound)
+		appendVaryOrigin(result.Headers)
+
+		return result
 	}
 
 	preflight := BuildPreflightHeaders(route.CORS, matched)
@@ -314,7 +315,73 @@ func (h *Handler) handlePreflight(table routing.Table, in *ServeInput) *ServeRes
 		headers[k] = []string{v}
 	}
 
+	// The gateway has already proved the route exists for the
+	// requested method (that is how preflight lookup works), so an
+	// empty cors.Methods config defaults ACAM to the validated
+	// request method instead of omitting the header — an omitted
+	// ACAM makes the browser fail a non-safelisted method the
+	// gateway would happily serve.
+	if _, present := headers["Access-Control-Allow-Methods"]; !present {
+		headers["Access-Control-Allow-Methods"] = []string{strings.ToUpper(acrm)}
+	}
+
 	return &ServeResult{Status: 204, Headers: headers}
+}
+
+// stampResponseCORS applies the route's CORS policy to an outgoing
+// response's headers. Every response of a CORS-configured route is
+// origin-varying content — including responses to requests with a
+// foreign or absent Origin — so Vary: Origin is appended
+// unconditionally; stamping it only on matches would let a shared
+// cache store the header-less variant and poison subsequent CORS
+// requests (the exact example in the Fetch standard's caching
+// section). The Access-Control-* headers are stamped only for a
+// matched origin.
+func stampResponseCORS(headers map[string][]string, cors *registry.CORSMeta, origin string) {
+	if cors == nil {
+		return
+	}
+
+	appendVaryOrigin(headers)
+
+	if matched := MatchOrigin(cors, origin); matched != "" {
+		for k, v := range BuildResponseCORSHeaders(cors, matched) {
+			if k == "Vary" {
+				continue // already appended, preserving upstream members
+			}
+			headers[k] = []string{v}
+		}
+	}
+}
+
+// appendVaryOrigin adds Origin to the response's Vary list without
+// clobbering upstream-supplied members — Vary is list-valued, and
+// dropping an upstream `Vary: Accept-Encoding` would be a caching
+// correctness bug of its own. Upstream replies arrive with
+// lowercase keys (mergeHeaders copies them verbatim), so any case
+// variant of the key is folded into the canonical "Vary" entry.
+// No-op when Origin is already present (as a standalone value or
+// inside a comma-joined member).
+func appendVaryOrigin(headers map[string][]string) {
+	members := headers["Vary"]
+
+	for k, v := range headers {
+		if k != "Vary" && strings.EqualFold(k, "Vary") {
+			members = append(members, v...)
+			delete(headers, k)
+		}
+	}
+
+	for _, member := range members {
+		for _, token := range strings.Split(member, ",") {
+			if strings.EqualFold(strings.TrimSpace(token), "Origin") {
+				headers["Vary"] = members
+				return
+			}
+		}
+	}
+
+	headers["Vary"] = append(members, "Origin")
 }
 
 // applyRateLimitGate runs the per-route rate-limit check for a
