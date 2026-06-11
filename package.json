@@ -74,7 +74,7 @@
     "overrides": {
       "glob": "^13.0.0",
       "inflight": "^1.0.7",
-      "fastify": "5.8.4"
+      "fastify": "5.8.5"
     },
     "onlyBuiltDependencies": [
       "@nestjs/core",
