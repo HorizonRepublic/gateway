@@ -5,6 +5,7 @@ package bench
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"time"
 
 	"github.com/testcontainers/testcontainers-go/modules/compose"
@@ -56,11 +57,40 @@ func startStack(ctx context.Context) (*liveStack, error) {
 		return nil, fmt.Errorf("gateway port: %w", err)
 	}
 
-	return &liveStack{
+	stack := &liveStack{
 		compose:     c,
 		gatewayURL:  fmt.Sprintf("http://%s:%s", host, port.Port()),
 		containerID: gw.GetContainerID(),
-	}, nil
+	}
+	if err := waitForRoute(ctx, stack.gatewayURL+"/users/alice"); err != nil {
+		stack.stop(ctx)
+		return nil, err
+	}
+	return stack, nil
+}
+
+// waitForRoute polls a known route until the gateway serves it with 200.
+// compose Wait(true) only proves containers are healthy; the gateway is
+// not servable until its routing snapshot lands and example-app has
+// registered its handlers in the KV registry — same readiness gap the
+// e2e harness closes with WaitReady.
+func waitForRoute(ctx context.Context, url string) error {
+	deadline := time.Now().Add(2 * time.Minute)
+	for time.Now().Before(deadline) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			return fmt.Errorf("build readiness probe: %w", err)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err == nil {
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				return nil
+			}
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	return fmt.Errorf("gateway never served %s within 2m", url)
 }
 
 // stop tears the stack down, removing orphans and volumes.

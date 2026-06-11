@@ -16,7 +16,7 @@ type Scenario struct {
 }
 
 // Scenarios returns the three baseline scenarios bound to baseURL:
-//   - proxy-echo:   unauth GET /users/1, pure HTTP→NATS→Nest→HTTP.
+//   - proxy-echo:   unauth GET /users/alice (seeded fixture user), pure HTTP→NATS→Nest→HTTP.
 //   - auth-verify:  GET /me with a valid bearer token (verifier hop on every call).
 //   - rate-limited: GET /rl/bench, limiter evaluates but never rejects under load.
 func Scenarios(baseURL string) []Scenario {
@@ -28,7 +28,7 @@ func Scenarios(baseURL string) []Scenario {
 			Name: "proxy-echo",
 			Targeter: vegeta.NewStaticTargeter(vegeta.Target{
 				Method: "GET",
-				URL:    baseURL + "/users/1",
+				URL:    baseURL + "/users/alice",
 			}),
 		},
 		{

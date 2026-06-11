@@ -21,7 +21,7 @@ func TestScenarios_TargetShapes(t *testing.T) {
 	var tgt vegeta.Target
 	require.NoError(t, byName["proxy-echo"].Targeter(&tgt))
 	assert.Equal(t, "GET", tgt.Method)
-	assert.Equal(t, base+"/users/1", tgt.URL)
+	assert.Equal(t, base+"/users/alice", tgt.URL)
 	assert.Empty(t, tgt.Header.Get("Authorization"))
 
 	require.NoError(t, byName["auth-verify"].Targeter(&tgt))
