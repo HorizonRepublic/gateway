@@ -36,3 +36,23 @@ func Summarize(m *vegeta.Metrics, requestedRate int) StepResult {
 		Max:           m.Latencies.Max,
 	}
 }
+
+// sustained reports whether a rung kept up: throughput within 5% of the
+// requested rate and a success ratio at or above 0.99.
+func sustained(s StepResult) bool {
+	return s.Success >= 0.99 && s.Throughput >= 0.95*float64(s.RequestedRate)
+}
+
+// DetectCeiling returns the highest rung that sustained the load. Steps
+// are assumed ordered by ascending RequestedRate. If no rung sustained,
+// the first rung is returned as a degenerate floor.
+func DetectCeiling(steps []StepResult) StepResult {
+	ceiling := steps[0]
+	for _, s := range steps {
+		if !sustained(s) {
+			break
+		}
+		ceiling = s
+	}
+	return ceiling
+}

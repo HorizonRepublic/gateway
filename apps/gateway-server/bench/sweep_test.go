@@ -28,3 +28,22 @@ func TestSummarize_ExtractsCorePercentiles(t *testing.T) {
 	assert.GreaterOrEqual(t, got.P999, 100*time.Millisecond, "p999 must reflect the slow tail")
 	assert.Greater(t, got.Throughput, 0.0)
 }
+
+func TestDetectCeiling_PicksLastSustainedRung(t *testing.T) {
+	steps := []StepResult{
+		{RequestedRate: 1000, Throughput: 998, Success: 1.0},
+		{RequestedRate: 2000, Throughput: 1995, Success: 1.0},
+		{RequestedRate: 5000, Throughput: 4980, Success: 0.999},
+		{RequestedRate: 10000, Throughput: 6200, Success: 0.94}, // knee: throughput stalls, errors climb
+	}
+	got := DetectCeiling(steps)
+	assert.Equal(t, 5000, got.RequestedRate, "ceiling is the last rung that kept up")
+}
+
+func TestDetectCeiling_FirstRungAlreadyBroken(t *testing.T) {
+	steps := []StepResult{
+		{RequestedRate: 1000, Throughput: 300, Success: 0.5},
+	}
+	got := DetectCeiling(steps)
+	assert.Equal(t, 1000, got.RequestedRate, "degenerate: return the only rung")
+}
