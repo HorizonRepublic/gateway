@@ -78,15 +78,15 @@ func runSoak(sc Scenario, containerID string, rate int, dur time.Duration) (Soak
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
-		max := start
+		maxSeen := start
 		for {
 			select {
 			case <-done:
-				peak <- max
+				peak <- maxSeen
 				return
 			case <-ticker.C:
-				if rss, e := dockerRSSBytes(containerID); e == nil && rss > max {
-					max = rss
+				if rss, e := dockerRSSBytes(containerID); e == nil && rss > maxSeen {
+					maxSeen = rss
 				}
 			}
 		}
