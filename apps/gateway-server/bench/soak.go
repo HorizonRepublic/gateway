@@ -3,6 +3,7 @@
 package bench
 
 import (
+	"context"
 	"fmt"
 	"os/exec"
 	"strconv"
@@ -27,7 +28,11 @@ type SoakResult struct {
 // parsing `docker stats --no-stream`. The MemUsage column looks like
 // "12.3MiB / 1.94GiB"; we parse the first operand.
 func dockerRSSBytes(containerID string) (uint64, error) {
-	out, err := exec.Command(
+	// Bounded: a stalled docker daemon must not wedge the sampler
+	// goroutine past the soak (runSoak blocks on the peak channel).
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx,
 		"docker", "stats", "--no-stream",
 		"--format", "{{.MemUsage}}", containerID,
 	).Output()
@@ -106,10 +111,10 @@ func runSoak(sc Scenario, containerID string, rate int, dur time.Duration) (Soak
 	if err != nil {
 		return SoakResult{}, err
 	}
+	// RSSEnd stays independent from RSSPeak: folding end into peak would
+	// make the plateau assertion (end ≤ 1.05 × peak) vacuously true and
+	// blind the guard to post-peak growth after the last sample.
 	res.RSSEnd = end
-	if end > res.RSSPeak {
-		res.RSSPeak = end
-	}
 	res.Throughput = m.Throughput
 	res.Success = m.Success
 	return res, nil

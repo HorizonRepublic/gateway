@@ -45,8 +45,12 @@ func sustained(s StepResult) bool {
 
 // DetectCeiling returns the highest rung that sustained the load. Steps
 // are assumed ordered by ascending RequestedRate. If no rung sustained,
-// the first rung is returned as a degenerate floor.
+// the first rung is returned as a degenerate floor; an empty ladder
+// yields the zero StepResult.
 func DetectCeiling(steps []StepResult) StepResult {
+	if len(steps) == 0 {
+		return StepResult{}
+	}
 	ceiling := steps[0]
 	for _, s := range steps {
 		if !sustained(s) {

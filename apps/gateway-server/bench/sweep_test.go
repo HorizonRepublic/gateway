@@ -40,6 +40,11 @@ func TestDetectCeiling_PicksLastSustainedRung(t *testing.T) {
 	assert.Equal(t, 5000, got.RequestedRate, "ceiling is the last rung that kept up")
 }
 
+func TestDetectCeiling_EmptyLadder(t *testing.T) {
+	got := DetectCeiling(nil)
+	assert.Zero(t, got, "empty ladder must yield a zero result, not panic")
+}
+
 func TestDetectCeiling_FirstRungAlreadyBroken(t *testing.T) {
 	steps := []StepResult{
 		{RequestedRate: 1000, Throughput: 300, Success: 0.5},

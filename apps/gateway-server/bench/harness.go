@@ -43,6 +43,16 @@ func startStack(ctx context.Context) (*liveStack, error) {
 	if err := c.Up(upCtx, compose.Wait(true)); err != nil {
 		return nil, fmt.Errorf("compose up: %w", err)
 	}
+	// After a successful Up every error path must tear the stack down or
+	// the containers leak past the failed bench run.
+	ok := false
+	defer func() {
+		if !ok {
+			downCtx, cancelDown := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancelDown()
+			_ = c.Down(downCtx, compose.RemoveOrphans(true), compose.RemoveVolumes(true))
+		}
+	}()
 
 	gw, err := c.ServiceContainer(ctx, "gateway-server")
 	if err != nil {
@@ -63,9 +73,9 @@ func startStack(ctx context.Context) (*liveStack, error) {
 		containerID: gw.GetContainerID(),
 	}
 	if err := waitForRoute(ctx, stack.gatewayURL+"/users/alice"); err != nil {
-		stack.stop(ctx)
 		return nil, err
 	}
+	ok = true
 	return stack, nil
 }
 
@@ -75,13 +85,17 @@ func startStack(ctx context.Context) (*liveStack, error) {
 // registered its handlers in the KV registry — same readiness gap the
 // e2e harness closes with WaitReady.
 func waitForRoute(ctx context.Context, url string) error {
+	client := &http.Client{Timeout: 2 * time.Second}
 	deadline := time.Now().Add(2 * time.Minute)
 	for time.Now().Before(deadline) {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("readiness poll cancelled: %w", err)
+		}
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 		if err != nil {
 			return fmt.Errorf("build readiness probe: %w", err)
 		}
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := client.Do(req)
 		if err == nil {
 			_ = resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
