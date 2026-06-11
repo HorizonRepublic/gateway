@@ -9,12 +9,13 @@ CONVENTIONS.md
 .aiderconfig
 .aider*
 
-# AI tool workspaces (project root)
-/.claude/
+# AI tool workspaces (any depth — tooling may drop state in subdirectories)
+.claude/
 /.cursor/
 /.codeium/
 /.continue/
 /.aider/
+/.serena/
 /.windsurf/
 /.copilot/
 /.goose/
