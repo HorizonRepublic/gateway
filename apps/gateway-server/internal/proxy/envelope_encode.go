@@ -73,8 +73,12 @@ func appendEnvelopeJSON(buf []byte, envelope *GatewayRequest) []byte {
 	// Auth is emitted only when claims are present. Public routes and
 	// optional-auth anonymous requests carry a nil Auth slice and must
 	// not leak a `"auth":null` field — that would confuse consumers
-	// running a pre-auth SDK build.
-	if len(envelope.Auth) > 0 {
+	// running a pre-auth SDK build. The literal JSON null is treated
+	// as absent for the same reason: a verifier that replies 200 with
+	// `"body":null` decodes to the 4-byte RawMessage "null", and
+	// emitting it verbatim would produce exactly the forbidden
+	// `"auth":null` shape through the back door.
+	if len(envelope.Auth) > 0 && !isJSONNull(envelope.Auth) {
 		buf = append(buf, `,"auth":`...)
 		buf = append(buf, envelope.Auth...)
 	}
@@ -84,6 +88,15 @@ func appendEnvelopeJSON(buf []byte, envelope *GatewayRequest) []byte {
 
 	buf = append(buf, '}')
 	return buf
+}
+
+// isJSONNull reports whether raw is exactly the JSON null literal.
+// Used to keep the "no auth field" invariant airtight when a
+// RawMessage carries the decoded token `null` instead of a nil slice.
+// Surrounding whitespace never appears here: sonic (like
+// encoding/json) captures a RawMessage as the bare value token.
+func isJSONNull(raw []byte) bool {
+	return len(raw) == 4 && raw[0] == 'n' && raw[1] == 'u' && raw[2] == 'l' && raw[3] == 'l'
 }
 
 // appendRouteContext emits a RouteContext as a JSON object with the

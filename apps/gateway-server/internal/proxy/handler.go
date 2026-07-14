@@ -252,19 +252,21 @@ func (h *Handler) Handle(ctx context.Context, in *ServeInput) *ServeResult {
 func (h *Handler) serve(ctx context.Context, in *ServeInput, obs *requestOutcome) *ServeResult {
 	table := h.cfg.Table()
 
-	if in.Method == "OPTIONS" {
+	// Per the WHATWG Fetch standard's CORS protocol section, a
+	// CORS-preflight request is an OPTIONS request that carries an
+	// Origin header (every CORS request does) AND an
+	// Access-Control-Request-Method header. Only that exact shape is
+	// diverted to preflight handling. Every other OPTIONS request is
+	// an ordinary request for a first-class registrable verb — the
+	// SDK's method union and the registry contract both admit OPTIONS
+	// routes — so it falls through to normal lookup: a matching
+	// OPTIONS route is proxied, anything else takes the 404/405 path.
+	if in.Method == "OPTIONS" &&
+		in.Headers["origin"] != "" &&
+		in.Headers["access-control-request-method"] != "" {
 		obs.route = observability.RoutePreflight
 		return h.handlePreflight(table, in)
 	}
-
-	// Bind a request-scoped logger before route lookup so even the
-	// 404/405 short-circuits carry the request_id + traceparent
-	// fields that operators rely on for cross-service correlation
-	// during postmortems. The route field is appended after lookup.
-	reqLog := h.cfg.Logger.With().
-		Str("request_id", in.RequestID).
-		Str("traceparent", in.Traceparent).
-		Logger()
 
 	route, params, ok := table.Lookup(in.Method, in.Path)
 	if !ok {
@@ -278,36 +280,82 @@ func (h *Handler) serve(ctx context.Context, in *ServeInput, obs *requestOutcome
 		return toServeResult(gerrors.NotFound)
 	}
 
-	reqLog = reqLog.With().
-		Str("route", route.Method+":"+route.PathTemplate).
-		Logger()
-
 	obs.route = route.PathTemplate
 	obs.subject = route.Subject
+
+	// Every response for a CORS-configured route is origin-varying
+	// content — 401s, 429s, and 5xxs included. A browser client can
+	// only read a cross-origin response that carries
+	// Access-Control-Allow-Origin, so an error response without the
+	// stamp is indistinguishable from a network failure to the SPA
+	// that needs to react to it (re-login on 401, back off on 429
+	// using X-RateLimit-Reset). Funnel every post-lookup exit through
+	// this closure so no short-circuit path can skip the stamp; it is
+	// a no-op for routes without a CORS block.
+	stampCORS := func(result *ServeResult) *ServeResult {
+		stampResponseCORS(result.Headers, route.CORS, in.Headers["origin"])
+		return result
+	}
 
 	// Intake guard: the request envelope is one JSON document
 	// (RFC 8259 §2), so a non-JSON inbound body can never be
 	// embedded verbatim — upstream JSON.parse would throw and the
 	// client would see an opaque 5xx indistinguishable from an
-	// outage. Reject with 400 before spending a verifier hop or a
-	// rate-limit store round-trip on a request that cannot be
-	// forwarded. Empty bodies skip the check (encoded as `null`).
-	if len(in.Body) > 0 && !codec.Valid(in.Body) {
-		reqLog.Debug().Msg("proxy: rejecting non-JSON request body")
-		return toServeResult(gerrors.BadRequest)
+	// outage. The body must also be valid UTF-8: syntactic JSON
+	// validity does not imply UTF-8 validity, and every other
+	// envelope string is sanitised to the RFC 8259 §8.1 UTF-8
+	// mandate while a body forwarded verbatim would be silently
+	// mangled to U+FFFD by the SDK side's non-fatal TextDecoder —
+	// the handler would then persist data that differs from what the
+	// client sent, with a 2xx and no error anywhere. On a healthcare
+	// write path that silent corruption is strictly worse than a
+	// rejection, so the gateway fails closed with 400 instead of
+	// sanitising the payload it is contractually forwarding
+	// verbatim. Empty bodies skip both checks (encoded as `null`).
+	if len(in.Body) > 0 && (!codec.Valid(in.Body) || !utf8.Valid(in.Body)) {
+		h.requestLog(in, &route).Debug().Msg("proxy: rejecting invalid request body")
+		return stampCORS(toServeResult(gerrors.BadRequest))
 	}
-
-	var claims json.RawMessage
-	var authHeaders map[string][]string
 
 	timeout := h.cfg.Timeout
 	if route.Timeout > 0 {
 		timeout = route.Timeout
 	}
 
+	// Rate-limit gate placement depends on the keyBy chain. When no
+	// strategy needs verified claims (ip / header / cookie — the
+	// default is ip), the gate runs BEFORE the verifier so an
+	// unauthenticated flood is shed at the declared per-route limit
+	// instead of hammering the verifier at line rate with requests
+	// that never consume a token. Claims-keyed chains (`user:*`)
+	// cannot run earlier: the bucket key is derived from claims
+	// that only exist after verification, and keying unverified
+	// traffic by IP would collapse every NAT'd tenant onto one
+	// bucket — the exact multi-tenant failure the user: strategy
+	// exists to prevent.
+	rlPreAuth := !rateLimitNeedsClaims(route)
+
+	var rlHeaders map[string]string
+	if rlPreAuth {
+		var rlShortCircuit *ServeResult
+		rlHeaders, rlShortCircuit = h.applyRateLimitGate(ctx, route, in, nil, timeout, obs)
+		if rlShortCircuit != nil {
+			return stampCORS(rlShortCircuit)
+		}
+	}
+
+	var claims json.RawMessage
+	var authHeaders map[string][]string
+
+	// authDeadline anchors the shared verifier + upstream budget.
+	// Zero (public route) means "no verifier hop happened" and the
+	// main request keeps the full per-route timeout.
+	var authDeadline time.Time
+
 	routeHeaders := in.Headers
 	if route.Auth != nil {
-		authOutcome := h.runAuthFlow(ctx, in, route, params, timeout, reqLog)
+		authDeadline = time.Now().Add(timeout)
+		authOutcome := h.runAuthFlow(ctx, in, route, params, timeout)
 		if !authOutcome.Proceed {
 			// 4xx short-circuits are verifier denials; 5xx means the
 			// verifier round trip itself failed (transport, decode).
@@ -316,7 +364,9 @@ func (h *Handler) serve(ctx context.Context, in *ServeInput, obs *requestOutcome
 				obs.auth = outcomeError
 			}
 
-			return authOutcome.ShortCircuit
+			// A pre-auth gate has already charged the client a
+			// token, so the budget headers belong on the denial too.
+			return stampCORS(mergeRateLimitHeaders(authOutcome.ShortCircuit, rlHeaders))
 		}
 
 		obs.auth = outcomeOK
@@ -337,9 +387,30 @@ func (h *Handler) serve(ctx context.Context, in *ServeInput, obs *requestOutcome
 		routeHeaders = stripAuthHeaders(in.Headers)
 	}
 
-	rlHeaders, rlShortCircuit := h.applyRateLimitGate(ctx, route, in, claims, timeout, reqLog, obs)
-	if rlShortCircuit != nil {
-		return rlShortCircuit
+	if !rlPreAuth {
+		var rlShortCircuit *ServeResult
+		rlHeaders, rlShortCircuit = h.applyRateLimitGate(ctx, route, in, claims, timeout, obs)
+		if rlShortCircuit != nil {
+			return stampCORS(rlShortCircuit)
+		}
+	}
+
+	// The verifier and the main route share ONE per-route timeout
+	// budget: whatever wall clock the auth flow (and the post-auth
+	// rate-limit gate) consumed is deducted before the main round
+	// trip, so worst-case client latency on a protected route stays
+	// bounded by the declared route timeout instead of doubling.
+	// The decremented value also feeds the envelope's timeoutMs so
+	// the upstream handler budgets its work against the time that is
+	// actually left, not the full allowance that has partially
+	// expired at the gateway. An exhausted budget fails closed as
+	// 504 without spending a NATS round trip that could not complete
+	// in time anyway.
+	if !authDeadline.IsZero() {
+		timeout = time.Until(authDeadline)
+		if timeout <= 0 {
+			return stampCORS(mergeRateLimitHeaders(toServeResult(gerrors.GatewayTimeout), rlHeaders))
+		}
 	}
 
 	payload := acquirePayload()
@@ -361,32 +432,37 @@ func (h *Handler) serve(ctx context.Context, in *ServeInput, obs *requestOutcome
 		Auth:        claims,
 	})
 	if err != nil {
-		reqLog.Error().Err(err).Msg("proxy encode failed")
-		return mergeRateLimitHeaders(toServeResult(gerrors.InternalError), rlHeaders)
+		h.requestLog(in, &route).Error().Err(err).Msg("proxy encode failed")
+		return stampCORS(mergeRateLimitHeaders(toServeResult(gerrors.InternalError), rlHeaders))
 	}
 
 	replyBytes, err := h.cfg.Nats.Request(ctx, route.Subject, *payload, timeout)
 	if err != nil {
 		if isTimeoutErr(err) {
-			return mergeRateLimitHeaders(toServeResult(gerrors.GatewayTimeout), rlHeaders)
+			return stampCORS(mergeRateLimitHeaders(toServeResult(gerrors.GatewayTimeout), rlHeaders))
 		}
-		reqLog.Error().Err(err).Str("subject", route.Subject).Msg("nats request failed")
-		return mergeRateLimitHeaders(toServeResult(gerrors.ServiceUnavailable), rlHeaders)
+		h.requestLog(in, &route).Error().Err(err).Str("subject", route.Subject).Msg("nats request failed")
+		return stampCORS(mergeRateLimitHeaders(toServeResult(gerrors.ServiceUnavailable), rlHeaders))
 	}
 
 	reply, err := h.cfg.Decoder.Decode(replyBytes)
 	if err != nil {
-		reqLog.Error().Err(err).Msg("reply decode failed")
-		return mergeRateLimitHeaders(toServeResult(gerrors.BadGateway), rlHeaders)
+		h.requestLog(in, &route).Error().Err(err).Msg("reply decode failed")
+		return stampCORS(mergeRateLimitHeaders(toServeResult(gerrors.BadGateway), rlHeaders))
 	}
 
 	mergedHeaders := mergeHeaders(reply.Headers, in.RequestID)
 	mergeAuthHeaders(mergedHeaders, authHeaders)
 
+	// Gateway-computed rate-limit headers are authoritative: the
+	// gate that produced them is the one that charged the token, so
+	// an upstream's own X-RateLimit-* values (Fastify lower-cases
+	// header names, so they arrive as case variants that an
+	// exact-match existence check would miss) are replaced rather
+	// than duplicated — two conflicting X-RateLimit-Limit lines give
+	// client backoff logic a nondeterministic budget.
 	for k, v := range rlHeaders {
-		if _, exists := mergedHeaders[k]; !exists {
-			mergedHeaders[k] = []string{v}
-		}
+		setGatewayHeader(mergedHeaders, k, v)
 	}
 
 	for k, v := range route.Headers {
@@ -415,6 +491,12 @@ func (h *Handler) serve(ctx context.Context, in *ServeInput, obs *requestOutcome
 // handlePreflight handles CORS OPTIONS preflight requests. It uses the
 // Access-Control-Request-Method header to find the actual route, then
 // returns 204 with the appropriate CORS headers if the origin matches.
+//
+// The caller (serve) only dispatches here for the WHATWG Fetch
+// preflight shape — OPTIONS with both Origin and
+// Access-Control-Request-Method present. The empty-ACRM check below
+// is defense-in-depth for future call sites, not a reachable branch
+// today.
 func (h *Handler) handlePreflight(table routing.Table, in *ServeInput) *ServeResult {
 	acrm := in.Headers["access-control-request-method"]
 	if acrm == "" {
@@ -573,7 +655,6 @@ func (h *Handler) applyRateLimitGate(
 	in *ServeInput,
 	claims json.RawMessage,
 	timeout time.Duration,
-	reqLog zerolog.Logger,
 	obs *requestOutcome,
 ) (map[string]string, *ServeResult) {
 	if route.RateLimit == nil || route.RateLimit.RPS <= 0 || h.cfg.RateLimiter == nil {
@@ -582,6 +663,7 @@ func (h *Handler) applyRateLimitGate(
 
 	rlKey, claimsErr := h.resolveRateLimitKey(in, route, claims)
 	if claimsErr != nil {
+		reqLog := h.requestLog(in, &route)
 		// Multi-tenant safety: a NAT'd fleet whose verifier ships
 		// malformed claims would otherwise collapse onto a single
 		// IP-keyed bucket, defeating per-user isolation. Route the
@@ -656,7 +738,7 @@ func (h *Handler) applyRateLimitGate(
 		// the unpopulated Decision verbatim) leaked Remaining: 0 /
 		// Reset: -62135596800 to clients on the fail-open branch.
 		decision = ratelimit.Decision{}
-		allowed = h.failPolicyFor(route).Apply(rlErr, route, fullKey, reqLog)
+		allowed = h.failPolicyFor(route).Apply(rlErr, route, fullKey, h.requestLog(in, &route))
 	}
 
 	// Outcome accounting for the access log: a clean decision maps to
@@ -710,8 +792,14 @@ func (h *Handler) applyRateLimitGate(
 // resolveRateLimitKey computes the rate-limit bucket key from the
 // route's keyBy chain, falling back to clientIP if nothing resolves.
 //
-// The returned error is non-nil only when the verifier-supplied
-// claims payload is non-empty but fails JSON unmarshal. Callers MUST
+// The claims payload is parsed only when the keyBy chain actually
+// contains a `user:` strategy — ip / header / cookie chains never
+// read claims, and a generic JSON parse into map[string]any on every
+// request of an authenticated, IP-keyed route is pure hot-path waste
+// (dozens of allocations producing a map that ResolveKey discards).
+//
+// The returned error is non-nil only when a claims-reading chain has
+// a non-empty claims payload that fails JSON unmarshal. Callers MUST
 // route that error through their FailPolicy instead of treating it
 // as a clean key resolution: a multi-tenant deployment that silently
 // fell back to clientIP for tenants with malformed claims would
@@ -730,7 +818,7 @@ func (h *Handler) resolveRateLimitKey(
 
 	var claimsMap map[string]any
 	var unmarshalErr error
-	if len(claims) > 0 {
+	if len(claims) > 0 && keyByNeedsClaims(keyBy) {
 		if err := json.Unmarshal(claims, &claimsMap); err != nil {
 			unmarshalErr = fmt.Errorf("ratelimit: claims unmarshal: %w", err)
 		}
@@ -745,6 +833,47 @@ func (h *Handler) resolveRateLimitKey(
 	)
 
 	return key, unmarshalErr
+}
+
+// keyByNeedsClaims reports whether a keyBy chain contains at least
+// one claims-based (`user:<field>`) strategy. Both the gate-ordering
+// decision in serve and the lazy claims parse in resolveRateLimitKey
+// key off this predicate, so the two stay consistent by construction.
+func keyByNeedsClaims(keyBy []string) bool {
+	for _, key := range keyBy {
+		if strings.HasPrefix(key, "user:") {
+			return true
+		}
+	}
+
+	return false
+}
+
+// rateLimitNeedsClaims reports whether the route's effective rate-
+// limit keyBy chain reads verifier claims. Routes without a rate-limit
+// block trivially do not; an empty keyBy defaults to ["ip"], which
+// does not either.
+func rateLimitNeedsClaims(route routing.Route) bool {
+	return route.RateLimit != nil && keyByNeedsClaims(route.RateLimit.KeyBy)
+}
+
+// requestLog builds a request-scoped logger carrying the correlation
+// fields (request_id, traceparent, route) that operators rely on for
+// cross-service postmortems. Constructed lazily at each emit site —
+// zerolog's With() allocates a ~500-byte context buffer per call, and
+// every log line on the request path sits on an error branch, so
+// building the logger up front charged the happy path two heap
+// allocations (~1 KiB) per request for context that was discarded
+// unused.
+func (h *Handler) requestLog(in *ServeInput, route *routing.Route) zerolog.Logger {
+	logCtx := h.cfg.Logger.With().
+		Str("request_id", in.RequestID).
+		Str("traceparent", in.Traceparent)
+	if route != nil {
+		logCtx = logCtx.Str("route", route.Method+":"+route.PathTemplate)
+	}
+
+	return logCtx.Logger()
 }
 
 // claimsRedactPattern matches JSON object-key prefixes likely to
@@ -947,7 +1076,6 @@ func (h *Handler) runAuthFlow(
 	route routing.Route,
 	params map[string]string,
 	timeout time.Duration,
-	reqLog zerolog.Logger,
 ) *authFlowResult {
 	verifyPayload := acquirePayload()
 	defer releasePayload(verifyPayload)
@@ -972,7 +1100,7 @@ func (h *Handler) runAuthFlow(
 		TimeoutMs:   timeout.Milliseconds(),
 	})
 	if err != nil {
-		reqLog.Error().Err(err).Msg("auth: verify encode failed")
+		h.requestLog(in, &route).Error().Err(err).Msg("auth: verify encode failed")
 		return &authFlowResult{Proceed: false, ShortCircuit: toServeResult(gerrors.InternalError)}
 	}
 
@@ -981,7 +1109,7 @@ func (h *Handler) runAuthFlow(
 		if isTimeoutErr(err) {
 			return &authFlowResult{Proceed: false, ShortCircuit: toServeResult(gerrors.GatewayTimeout)}
 		}
-		reqLog.Error().
+		h.requestLog(in, &route).Error().
 			Err(err).
 			Str("subject", route.Auth.VerifierSubject).
 			Msg("auth: verifier nats request failed")
@@ -991,7 +1119,7 @@ func (h *Handler) runAuthFlow(
 
 	reply, err := h.cfg.Decoder.Decode(replyBytes)
 	if err != nil {
-		reqLog.Error().Err(err).Msg("auth: verifier reply decode failed")
+		h.requestLog(in, &route).Error().Err(err).Msg("auth: verifier reply decode failed")
 		return &authFlowResult{Proceed: false, ShortCircuit: toServeResult(gerrors.BadGateway)}
 	}
 
@@ -1059,11 +1187,28 @@ func stampDefaultWWWAuthenticate(status int, headers map[string][]string) {
 // the wire. The gateway always stamps its own x-request-id on top of
 // whatever the upstream service emitted, so a compromised upstream
 // cannot forge correlator ids.
+//
+// HTTP field names are case-insensitive (RFC 9110 §5.1) but Go map
+// keys are not, so gateway-owned keys are matched with a fold: an
+// upstream reply carrying "X-Request-Id" would otherwise survive as
+// a second map entry next to the gateway's lowercase stamp, and the
+// HTTP adapter's Add loop would emit two X-Request-Id lines on the
+// wire — one of them attacker-controlled, defeating the anti-spoof
+// invariant above. Content-type case variants are folded into the
+// canonical lowercase key instead of dropped, preserving the
+// upstream's ability to override the JSON default.
 func mergeHeaders(reply map[string][]string, requestID string) map[string][]string {
 	out := make(map[string][]string, len(reply)+2)
 	out["content-type"] = []string{"application/json"}
 	for k, v := range reply {
-		out[k] = v
+		switch {
+		case strings.EqualFold(k, "x-request-id"):
+			continue
+		case strings.EqualFold(k, "content-type"):
+			out["content-type"] = v
+		default:
+			out[k] = v
+		}
 	}
 	out["x-request-id"] = []string{requestID}
 	return out
@@ -1095,8 +1240,20 @@ func mergeAuthHeaders(merged map[string][]string, authHeaders map[string][]strin
 			continue
 		}
 
-		if verifierKey == "set-cookie" {
-			existing := merged["set-cookie"]
+		// Fold, don't exact-match: header names are case-insensitive
+		// on the wire (RFC 9110 §5.1) and a verifier emitting
+		// "Set-Cookie" must get the same verifier-first cookie
+		// ordering as one emitting "set-cookie". Existing case
+		// variants in the merged map are collapsed into the canonical
+		// lowercase key for the same reason.
+		if strings.EqualFold(verifierKey, "set-cookie") {
+			var existing []string
+			for k, v := range merged {
+				if strings.EqualFold(k, "set-cookie") {
+					existing = append(existing, v...)
+					delete(merged, k)
+				}
+			}
 			combined := make([]string, 0, len(verifierValues)+len(existing))
 			combined = append(combined, verifierValues...)
 			combined = append(combined, existing...)

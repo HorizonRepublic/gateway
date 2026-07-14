@@ -17,9 +17,10 @@ const (
 // initialPayloadCap is the pre-allocated capacity of pooled scratch
 // []byte slices used for envelope marshalling. 1 KiB covers the
 // typical envelope footprint (route + small body + headers) without
-// an initial grow; sonic's EncodeInto reallocates automatically if a
-// specific request exceeds this, and the grown capacity is preserved
-// across pool cycles by storing a pointer to the slice.
+// an initial grow; the serializer's appends reallocate automatically
+// if a specific request exceeds this, and the grown capacity is
+// preserved across pool cycles (up to maxRetainedPayloadCap — see
+// releasePayload) by storing a pointer to the slice.
 const initialPayloadCap = 1024
 
 // envelopePool reuses GatewayRequest instances across requests. Every
@@ -46,12 +47,25 @@ func acquireEnvelope() *GatewayRequest {
 	return envelope
 }
 
-// releaseEnvelope returns an envelope to the pool. It is safe to call
-// with a nil receiver to simplify defer statements.
+// releaseEnvelope resets an envelope and returns it to the pool. It
+// is safe to call with a nil receiver to simplify defer statements.
+//
+// The reset happens on release, not only on acquire, because a
+// pooled envelope otherwise retains live references to the last
+// request's Body bytes, Auth claims, and header strings — including
+// raw Authorization bearer tokens on the verifier path — for an
+// unbounded idle period between requests. Credentials pinned in
+// pooled memory outlive the request they belong to and surface in
+// heap dumps or through any memory-disclosure bug. Acquire still
+// resets defensively (double reset of an already-clean envelope is
+// map iteration over empty maps — effectively free) so a stray Put
+// of a dirty envelope from future code cannot leak state into a
+// request.
 func releaseEnvelope(envelope *GatewayRequest) {
 	if envelope == nil {
 		return
 	}
+	envelope.reset()
 	envelopePool.Put(envelope)
 }
 
@@ -87,11 +101,38 @@ func acquirePayload() *[]byte {
 	return ptr
 }
 
-// releasePayload returns a payload buffer to the pool. Safe with a
-// nil pointer so defer statements can unconditionally release.
+// maxRetainedPayloadCap bounds the capacity of payload buffers the
+// pool retains. One multi-megabyte request body would otherwise grow
+// a pooled buffer permanently — N pool entries each pinning the
+// largest body they ever saw inflates steady-state RSS long after
+// the burst that caused it. 64 KiB comfortably covers the typical
+// envelope (headers + small JSON body, see initialPayloadCap) while
+// letting rare oversized buffers fall to the GC.
+const maxRetainedPayloadCap = 64 * 1024
+
+// releasePayload returns a payload buffer to the pool, dropping
+// buffers grown beyond maxRetainedPayloadCap so a burst of large
+// bodies cannot permanently inflate the pool's memory footprint.
+// The retained buffer is truncated to zero length on release; the
+// backing array is NOT zeroed because the payload is re-sliced to
+// [:0] and fully overwritten by the next encode before any read —
+// unlike the envelope's reference fields, stale payload bytes are
+// unreachable through the pool's API.
+//
+// Safe with a nil pointer so defer statements can unconditionally
+// release.
 func releasePayload(buf *[]byte) {
-	if buf == nil {
+	if buf == nil || !shouldRetainPayload(cap(*buf)) {
 		return
 	}
+	*buf = (*buf)[:0]
 	payloadPool.Put(buf)
+}
+
+// shouldRetainPayload decides whether a released payload buffer of
+// the given capacity goes back into the pool. Split out from
+// releasePayload so the retention policy is unit-testable without
+// poking at sync.Pool internals.
+func shouldRetainPayload(capacity int) bool {
+	return capacity <= maxRetainedPayloadCap
 }

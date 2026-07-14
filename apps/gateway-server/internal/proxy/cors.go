@@ -87,8 +87,16 @@ func BuildPreflightHeaders(cors *registry.CORSMeta, matchedOrigin string) map[st
 		h["Access-Control-Allow-Credentials"] = "true"
 	}
 
-	if cors.MaxAge > 0 {
-		h["Access-Control-Max-Age"] = strconv.Itoa(cors.MaxAge)
+	// A configured maxAge is emitted verbatim, including the explicit
+	// 0 that disables preflight caching (per the WHATWG Fetch
+	// CORS-preflight cache section, a cache entry expires after
+	// max-age seconds, so 0 means "do not reuse"). An absent maxAge
+	// (nil) emits nothing and browsers apply their 5-second default.
+	// Negative values cannot appear here: the SDK validator rejects
+	// them at registration and JSON cannot round-trip a negative into
+	// a non-negative contract silently.
+	if cors.MaxAge != nil && *cors.MaxAge >= 0 {
+		h["Access-Control-Max-Age"] = strconv.Itoa(*cors.MaxAge)
 	}
 
 	h["Vary"] = "Origin"

@@ -97,7 +97,14 @@ type CORSMeta struct {
 	Methods     []string `json:"methods,omitempty"`
 	Headers     []string `json:"headers,omitempty"`
 	Credentials bool     `json:"credentials,omitempty"`
-	MaxAge      int      `json:"maxAge,omitempty"`
+	// MaxAge is a pointer so an explicit `maxAge: 0` ("disable
+	// preflight caching") survives the wire distinct from an absent
+	// field. A plain int would decode both to 0 and the gateway
+	// would silently drop the header, letting browsers fall back to
+	// their 5-second default preflight cache (WHATWG Fetch,
+	// CORS-preflight cache: "If max-age is failure or null, then set
+	// max-age to 5") — the opposite of what the operator configured.
+	MaxAge *int `json:"maxAge,omitempty"`
 	// ExposeHeaders is the per-route override for
 	// `Access-Control-Expose-Headers`. When nil or empty the gateway
 	// emits its standard list of gateway-stamped headers

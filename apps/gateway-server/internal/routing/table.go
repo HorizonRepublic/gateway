@@ -19,19 +19,14 @@ type Table interface {
 	// caller for the lifetime of the request only.
 	Lookup(method, path string) (route Route, params map[string]string, ok bool)
 
-	// Methods returns the set of HTTP verbs registered for the given
-	// path. It is used by the transport layer to populate the `Allow`
-	// header on 405 Method Not Allowed responses.
-	//
-	// IMPORTANT: the current implementation matches `path` against
-	// stored templates by exact string equality, not by template
-	// matching. This is sufficient for static templates ("/users"),
-	// where the router path and the registered template coincide, but
-	// it is a simplification: routes with parameters
-	// ("/users/:id") will not be listed here when the caller passes a
-	// concrete request path ("/users/42"). The proxy layer currently
-	// only calls Methods for static paths, so this limitation is
-	// acceptable; it will be revisited alongside any future trie swap
-	// of the default linear-scan implementation.
+	// Methods returns the set of HTTP verbs whose registered
+	// templates match the given concrete request path, using the
+	// same template semantics as Lookup ("/users/42" matches a
+	// registered "/users/:id"). It is used by the proxy layer to
+	// populate the `Allow` header on 405 Method Not Allowed
+	// responses; the proxy calls it with every unmatched request
+	// path, static or parameterized, so implementations MUST
+	// template-match rather than compare template strings for
+	// equality. Returned verbs are deduplicated.
 	Methods(path string) []string
 }

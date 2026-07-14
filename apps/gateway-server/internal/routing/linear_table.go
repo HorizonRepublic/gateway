@@ -1,6 +1,9 @@
 package routing
 
-import "strings"
+import (
+	"slices"
+	"strings"
+)
 
 // linearTable is a simple linear-scan matcher over path templates. It
 // is suitable for registries of tens to low hundreds of routes, which
@@ -62,13 +65,21 @@ func (t *linearTable) Lookup(method, path string) (Route, map[string]string, boo
 	return Route{}, nil, false
 }
 
-// Methods returns the verbs registered for an EXACT template match.
-// See the Table interface godoc for the rationale behind the exact-
-// match simplification and its acceptable scope for the MVP.
+// Methods returns the verbs whose registered templates match the
+// concrete request path, using the same template matcher as Lookup.
+// This keeps 405-vs-404 classification identical for static and
+// parameterized routes: a POST to "/users/42" against a registered
+// "GET /users/:id" yields ["GET"], producing 405 + Allow instead of
+// a misleading 404. Duplicate verbs (two templates matching the same
+// concrete path) are collapsed so the Allow header never repeats a
+// member.
 func (t *linearTable) Methods(path string) []string {
 	var methods []string
 	for i := range t.routes {
-		if t.routes[i].PathTemplate == path {
+		if _, ok := matchTemplate(t.routes[i].PathTemplate, path); !ok {
+			continue
+		}
+		if !slices.Contains(methods, t.routes[i].Method) {
 			methods = append(methods, t.routes[i].Method)
 		}
 	}
