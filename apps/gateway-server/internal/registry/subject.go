@@ -44,6 +44,32 @@ const subjectSuffix = "__microservice.cmd."
 // failing the whole rebuild, because a single bad entry in KV should not
 // take the entire gateway offline. The caller is expected to log the
 // returned error and move on.
+// ServiceFromSubject extracts the upstream service identity from a full
+// NATS RPC subject built by SubjectFromKey. The service name is the
+// prefix before the "__microservice.cmd." marker, which maps 1:1 to one
+// deployed upstream service — every pattern that service registers
+// shares the prefix, so grouping by it groups by failure domain.
+//
+// Example:
+//
+//	ServiceFromSubject("users-svc__microservice.cmd.users.create")
+//	// returns: "users-svc"
+//
+// If the marker is missing or the prefix is empty (a subject that does
+// not follow the nestjs-jetstream convention), the whole subject is
+// returned so callers degrade to per-subject granularity instead of
+// collapsing unrelated subjects into one identity. This function lives
+// here — next to kvKeySeparator and subjectSuffix — because it encodes
+// the same cross-repo naming convention and MUST change in lockstep
+// with them (see the COMPATIBILITY NOTE above).
+func ServiceFromSubject(subject string) string {
+	idx := strings.Index(subject, subjectSuffix)
+	if idx <= 0 {
+		return subject
+	}
+	return subject[:idx]
+}
+
 func SubjectFromKey(key string) (string, error) {
 	idx := strings.Index(key, kvKeySeparator)
 	if idx == -1 {
