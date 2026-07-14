@@ -74,11 +74,13 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # gateway-server's nx targets wrap Go tooling (go test, golangci-lint)
+      # already covered by the go job, so it is excluded here.
       - name: Jest
-        run: pnpm exec nx run-many -t test
+        run: pnpm exec nx run-many -t test --exclude=gateway-server
 
       - name: ESLint
-        run: pnpm exec nx run-many -t lint
+        run: pnpm exec nx run-many -t lint --exclude=gateway-server
 
   # Separate job so unit failures fail fast without paying for the
   # compose stack build. The suite owns its docker compose lifecycle.

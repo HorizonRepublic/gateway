@@ -64,7 +64,7 @@ linters:
         - name: unreachable-code
         - name: redefines-builtin-id
     wrapcheck:
-      ignoreSigs:
+      ignore-sigs:
         - .Errorf(
         - errors.New(
         - errors.Unwrap(
