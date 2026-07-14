@@ -13,6 +13,7 @@ import (
 
 	"github.com/HorizonRepublic/gateway/apps/gateway-server/internal/codec"
 	gerrors "github.com/HorizonRepublic/gateway/apps/gateway-server/internal/errors"
+	"github.com/HorizonRepublic/gateway/apps/gateway-server/internal/observability"
 	"github.com/HorizonRepublic/gateway/apps/gateway-server/internal/ratelimit"
 	"github.com/HorizonRepublic/gateway/apps/gateway-server/internal/registry"
 	"github.com/HorizonRepublic/gateway/apps/gateway-server/internal/routing"
@@ -52,6 +53,18 @@ type HandlerConfig struct {
 	// but production bootstrap MUST set a distinct, shorter budget
 	// (default 50ms per the cfg.RateLimitTimeout env knob).
 	RateLimitTimeout time.Duration
+	// Metrics receives the RED observation and in-flight gauge bumps
+	// for every request. nil disables metrics collection entirely —
+	// the handler then skips the timing wrapper's metric calls, which
+	// keeps legacy test harnesses and benchmark fixtures working
+	// without a registry.
+	Metrics *observability.Metrics
+	// AccessLog enables the single structured completion event per
+	// request (event=http.access). Wired from ACCESS_LOG_ENABLED;
+	// defaults to true in production bootstrap. The event is emitted
+	// at INFO on cfg.Logger, so LOG_LEVEL=warn silences it without a
+	// separate knob.
+	AccessLog bool
 }
 
 // Handler is the HTTP→NATS→HTTP orchestrator. It owns one request from
@@ -119,10 +132,104 @@ type ServeResult struct {
 	GatewayOwnedBody bool
 }
 
+// requestOutcome accumulates the per-request facts the observability
+// wrapper needs after serve returns: the matched route template (or
+// an unmatched/preflight sentinel), the NATS subject, and the auth /
+// rate-limit gate outcomes. Lives on Handle's stack — no allocation.
+type requestOutcome struct {
+	route     string
+	subject   string
+	auth      string
+	rateLimit string
+}
+
+// Outcome label values for the auth and rate-limit gates. Closed
+// sets: both fields feed the access log, and a bounded vocabulary is
+// what makes the log queryable ("all fail-open decisions last hour")
+// instead of free-text.
+const (
+	// outcomeNone marks a gate that was not configured for the route.
+	outcomeNone = "none"
+	// outcomeOK marks a verifier 200 whose claims travel on the envelope.
+	outcomeOK = "ok"
+	// outcomeAnonymous marks an optional-auth route whose verifier
+	// replied 401 — the request proceeded without claims.
+	outcomeAnonymous = "anonymous"
+	// outcomeDenied marks a verifier 4xx short-circuit (401/403/...).
+	outcomeDenied = "denied"
+	// outcomeError marks a gate that failed for infrastructure
+	// reasons: verifier transport/decode failure, or a rate-limit
+	// store error that FailPolicy resolved to reject.
+	outcomeError = "error"
+	// outcomeAllowed marks a healthy rate-limit pass.
+	outcomeAllowed = "allowed"
+	// outcomeRejected marks a 429 — bucket empty under a healthy backend.
+	outcomeRejected = "rejected"
+	// outcomeFailOpen marks a store/claims failure that FailPolicy
+	// resolved to allow — enforcement was degraded for this request.
+	outcomeFailOpen = "fail_open"
+)
+
 // Handle performs the full request lifecycle: route lookup, envelope
 // encode, NATS request, reply decode, response construction. Errors
 // are translated to the appropriate HTTP status with a pre-encoded
 // JSON error body from the internal/errors package.
+//
+// Handle is the observability wrapper around serve: it times the
+// request, maintains the in-flight gauge, records the RED metrics,
+// and emits the single structured access-log event at completion.
+// When both surfaces are disabled (nil Metrics, AccessLog false) it
+// delegates straight to serve so legacy harnesses pay nothing.
+func (h *Handler) Handle(ctx context.Context, in *ServeInput) *ServeResult {
+	obs := requestOutcome{
+		route:     observability.RouteUnmatched,
+		auth:      outcomeNone,
+		rateLimit: outcomeNone,
+	}
+
+	if h.cfg.Metrics == nil && !h.cfg.AccessLog {
+		return h.serve(ctx, in, &obs)
+	}
+
+	if h.cfg.Metrics != nil {
+		h.cfg.Metrics.HTTPRequestStarted()
+	}
+
+	start := time.Now()
+	result := h.serve(ctx, in, &obs)
+	elapsed := time.Since(start)
+
+	if h.cfg.Metrics != nil {
+		h.cfg.Metrics.HTTPRequestFinished()
+		h.cfg.Metrics.ObserveHTTPRequest(in.Method, obs.route, result.Status, elapsed.Seconds())
+	}
+
+	if h.cfg.AccessLog {
+		// Exactly one completion event per request. Fields reuse
+		// values already resolved upstream (trusted-proxy client IP,
+		// adapter-minted request id) — nothing is re-derived here.
+		h.cfg.Logger.Info().
+			Str("event", "http.access").
+			Str("method", in.Method).
+			Str("route", obs.route).
+			Int("status", result.Status).
+			Float64("duration_ms", float64(elapsed.Nanoseconds())/1e6).
+			Int("bytes_out", len(result.Body)).
+			Str("client_ip", in.RemoteAddr).
+			Str("request_id", in.RequestID).
+			Str("subject", obs.subject).
+			Str("auth", obs.auth).
+			Str("ratelimit", obs.rateLimit).
+			Msg("request completed")
+	}
+
+	return result
+}
+
+// serve owns the request lifecycle proper. It mutates obs as facts
+// become known (route match, auth outcome, rate-limit outcome) so the
+// Handle wrapper can observe them after the response is built without
+// re-deriving anything.
 //
 // The ctx argument is the inbound HTTP request's context. It is
 // propagated into every blocking dependency call (rate-limit store,
@@ -142,10 +249,11 @@ type ServeResult struct {
 // referenced by NATS and is safe to reuse. Any future refactor that
 // keeps the payload slice alive beyond this function MUST stop using
 // the pool.
-func (h *Handler) Handle(ctx context.Context, in *ServeInput) *ServeResult {
+func (h *Handler) serve(ctx context.Context, in *ServeInput, obs *requestOutcome) *ServeResult {
 	table := h.cfg.Table()
 
 	if in.Method == "OPTIONS" {
+		obs.route = observability.RoutePreflight
 		return h.handlePreflight(table, in)
 	}
 
@@ -174,6 +282,9 @@ func (h *Handler) Handle(ctx context.Context, in *ServeInput) *ServeResult {
 		Str("route", route.Method+":"+route.PathTemplate).
 		Logger()
 
+	obs.route = route.PathTemplate
+	obs.subject = route.Subject
+
 	// Intake guard: the request envelope is one JSON document
 	// (RFC 8259 §2), so a non-JSON inbound body can never be
 	// embedded verbatim — upstream JSON.parse would throw and the
@@ -198,7 +309,19 @@ func (h *Handler) Handle(ctx context.Context, in *ServeInput) *ServeResult {
 	if route.Auth != nil {
 		authOutcome := h.runAuthFlow(ctx, in, route, params, timeout, reqLog)
 		if !authOutcome.Proceed {
+			// 4xx short-circuits are verifier denials; 5xx means the
+			// verifier round trip itself failed (transport, decode).
+			obs.auth = outcomeDenied
+			if authOutcome.ShortCircuit.Status >= 500 {
+				obs.auth = outcomeError
+			}
+
 			return authOutcome.ShortCircuit
+		}
+
+		obs.auth = outcomeOK
+		if authOutcome.Claims == nil {
+			obs.auth = outcomeAnonymous
 		}
 
 		claims = authOutcome.Claims
@@ -214,7 +337,7 @@ func (h *Handler) Handle(ctx context.Context, in *ServeInput) *ServeResult {
 		routeHeaders = stripAuthHeaders(in.Headers)
 	}
 
-	rlHeaders, rlShortCircuit := h.applyRateLimitGate(ctx, route, in, claims, timeout, reqLog)
+	rlHeaders, rlShortCircuit := h.applyRateLimitGate(ctx, route, in, claims, timeout, reqLog, obs)
 	if rlShortCircuit != nil {
 		return rlShortCircuit
 	}
@@ -451,6 +574,7 @@ func (h *Handler) applyRateLimitGate(
 	claims json.RawMessage,
 	timeout time.Duration,
 	reqLog zerolog.Logger,
+	obs *requestOutcome,
 ) (map[string]string, *ServeResult) {
 	if route.RateLimit == nil || route.RateLimit.RPS <= 0 || h.cfg.RateLimiter == nil {
 		return nil, nil
@@ -486,6 +610,7 @@ func (h *Handler) applyRateLimitGate(
 
 		rlHeaders := ratelimit.BuildHeaders(route.RateLimit, ratelimit.Decision{})
 		if !allowed {
+			obs.rateLimit = outcomeError
 			result := toServeResult(gerrors.ServiceUnavailable)
 			for k, v := range rlHeaders {
 				result.Headers[k] = []string{v}
@@ -532,6 +657,21 @@ func (h *Handler) applyRateLimitGate(
 		// Reset: -62135596800 to clients on the fail-open branch.
 		decision = ratelimit.Decision{}
 		allowed = h.failPolicyFor(route).Apply(rlErr, route, fullKey, reqLog)
+	}
+
+	// Outcome accounting for the access log: a clean decision maps to
+	// allowed/rejected; a store error maps to fail_open (FailPolicy
+	// let the request through with degraded enforcement) or error
+	// (FailPolicy rejected on the gateway's behalf).
+	switch {
+	case rlErr == nil && allowed:
+		obs.rateLimit = outcomeAllowed
+	case rlErr == nil:
+		obs.rateLimit = outcomeRejected
+	case allowed:
+		obs.rateLimit = outcomeFailOpen
+	default:
+		obs.rateLimit = outcomeError
 	}
 
 	rlHeaders := ratelimit.BuildHeaders(route.RateLimit, decision)

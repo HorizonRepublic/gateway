@@ -449,3 +449,78 @@ func TestResilientRequester_InnerErrorsPropagateVerbatimWhileClosed(t *testing.T
 	require.ErrorIs(t, err, sentinel,
 		"closed-state breaker must not rewrap inner errors — the proxy's 504 timeout classification depends on errors.Is reaching nats.ErrTimeout")
 }
+
+// TestResilientRequester_StatsCountQueueTimeouts pins the shed
+// counter the metrics layer exports: every ErrInflightQueueFull adds
+// exactly one, and successful admissions do not.
+func TestResilientRequester_StatsCountQueueTimeouts(t *testing.T) {
+	hold := make(chan struct{})
+	inner := &fakeInner{hold: hold}
+	r := NewResilientRequester(inner, ResilientConfig{
+		MaxInflight:  1,
+		QueueTimeout: 10 * time.Millisecond,
+	}, zerolog.Nop())
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = r.Request(context.Background(), "s", nil, time.Second)
+	}()
+	require.Eventually(t, func() bool { return inner.callCount() == 1 },
+		time.Second, time.Millisecond)
+
+	assert.Equal(t, int64(1), r.Inflight(),
+		"held request must show on the in-flight gauge")
+
+	_, err := r.Request(context.Background(), "s", nil, time.Second)
+	require.ErrorIs(t, err, ErrInflightQueueFull)
+	assert.Equal(t, int64(1), r.QueueTimeouts())
+
+	close(hold)
+	<-done
+
+	assert.Equal(t, int64(0), r.Inflight(),
+		"in-flight gauge must return to zero once the reply lands")
+	assert.Equal(t, int64(1), r.QueueTimeouts(),
+		"successful completion must not touch the shed counter")
+}
+
+// TestResilientRequester_StatsCountBreakerTrips pins the trip counter
+// and state gauge the metrics layer exports: each closed→open
+// transition adds one trip, and BreakerState follows the gobreaker
+// encoding (0 closed, 2 open).
+func TestResilientRequester_StatsCountBreakerTrips(t *testing.T) {
+	inner := &fakeInner{err: errors.New("nats down")}
+	r := NewResilientRequester(inner, ResilientConfig{
+		BreakerEnabled:   true,
+		FailureThreshold: 1,
+		RecoveryTimeout:  time.Hour,
+		HalfOpenProbes:   1,
+	}, zerolog.Nop())
+
+	assert.Equal(t, int64(0), r.BreakerState(), "breaker starts closed")
+	assert.Equal(t, int64(0), r.BreakerTrips())
+
+	_, err := r.Request(context.Background(), "s", nil, time.Second)
+	require.Error(t, err)
+
+	assert.Equal(t, int64(2), r.BreakerState(), "breaker open after threshold")
+	assert.Equal(t, int64(1), r.BreakerTrips())
+}
+
+// TestResilientRequester_StatsDisabledLayersReadZero pins the
+// zero-config reading: no semaphore and no breaker means the stats
+// surface reports a closed breaker and no sheds, so dashboards on a
+// cap-less deployment stay meaningful instead of going absent.
+func TestResilientRequester_StatsDisabledLayersReadZero(t *testing.T) {
+	inner := &fakeInner{}
+	r := NewResilientRequester(inner, ResilientConfig{}, zerolog.Nop())
+
+	_, err := r.Request(context.Background(), "s", nil, time.Second)
+	require.NoError(t, err)
+
+	assert.Equal(t, int64(0), r.Inflight())
+	assert.Equal(t, int64(0), r.QueueTimeouts())
+	assert.Equal(t, int64(0), r.BreakerTrips())
+	assert.Equal(t, int64(0), r.BreakerState())
+}

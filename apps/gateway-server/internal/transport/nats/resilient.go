@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -169,6 +170,55 @@ type ResilientRequester struct {
 	// Created eagerly at construction so the overflow path is a
 	// plain field read.
 	sharedBreaker *gobreaker.CircuitBreaker
+
+	// Admission-control counters sampled at scrape time by the
+	// observability layer via the accessor methods below. Plain
+	// atomics keep the request hot path free of any metrics-library
+	// coupling: two atomic adds per request for the in-flight gauge,
+	// one on the corresponding shed/trip event for the counters.
+	inflight      atomic.Int64
+	queueTimeouts atomic.Int64
+	breakerTrips  atomic.Int64
+}
+
+// Inflight returns the number of requests currently admitted past
+// the semaphore whose reply has not yet arrived.
+func (r *ResilientRequester) Inflight() int64 { return r.inflight.Load() }
+
+// QueueTimeouts returns the monotonic count of requests shed with
+// ErrInflightQueueFull because no in-flight slot freed up within the
+// queue timeout (caller-context cancellations during the wait are
+// counted too — the request was shed either way).
+func (r *ResilientRequester) QueueTimeouts() int64 { return r.queueTimeouts.Load() }
+
+// BreakerTrips returns the monotonic count of circuit-breaker
+// transitions into the open state, summed across every per-service
+// breaker and the shared overflow fallback.
+func (r *ResilientRequester) BreakerTrips() int64 { return r.breakerTrips.Load() }
+
+// BreakerState reports the WORST state across all breakers using the
+// gobreaker encoding: 0 closed, 1 half-open, 2 open. Any single open
+// breaker drives the gauge to 2 — for a scalar alerting signal,
+// "some upstream is being fast-failed" is the fact that matters;
+// per-service detail lives in BreakerSnapshots. A disabled breaker
+// layer reports 0 — it never opens, so "closed" is the truthful
+// reading and dashboards alerting on state > 0 stay quiet. Runs at
+// scrape cadence, so the O(services) walk is off the hot path.
+func (r *ResilientRequester) BreakerState() int64 {
+	if !r.breakerEnabled {
+		return int64(gobreaker.StateClosed)
+	}
+
+	worst := r.sharedBreaker.State()
+	r.breakers.Range(func(_, value any) bool {
+		if s := value.(*gobreaker.CircuitBreaker).State(); s > worst {
+			worst = s
+		}
+
+		return true
+	})
+
+	return int64(worst)
 }
 
 // NewResilientRequester wraps inner with the layers enabled in cfg.
@@ -225,6 +275,9 @@ func (r *ResilientRequester) newBreaker(name string) *gobreaker.CircuitBreaker {
 			return err == nil || errors.Is(err, context.Canceled)
 		},
 		OnStateChange: func(name string, from, to gobreaker.State) {
+			if to == gobreaker.StateOpen {
+				r.breakerTrips.Add(1)
+			}
 			r.logger.Warn().
 				Str("breaker", name).
 				Str("from", from.String()).
@@ -319,10 +372,18 @@ func (r *ResilientRequester) Request(
 			// cancellation land here; the distinction does not
 			// matter to the caller — the request was never
 			// admitted, so 503 semantics apply either way.
+			r.queueTimeouts.Add(1)
 			return nil, fmt.Errorf("%w (max in-flight reached, waited %s)", ErrInflightQueueFull, r.queueTimeout)
 		}
 		defer r.sem.Release(1)
 	}
+
+	// Count every admitted request, semaphore or not — the in-flight
+	// gauge is a saturation signal for operators sizing
+	// NATS_MAX_INFLIGHT, and it must read truthfully when the cap is
+	// disabled (the exact deployments that need the signal most).
+	r.inflight.Add(1)
+	defer r.inflight.Add(-1)
 
 	if !r.breakerEnabled {
 		data, err := r.inner.Request(ctx, subject, payload, timeout)
