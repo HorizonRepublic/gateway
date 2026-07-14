@@ -48,15 +48,15 @@ var (
 // handler_registry KV. natsURL is consumed by NATSConn for tests that
 // mutate KV directly (PR 8 onwards).
 type liveStack struct {
-	compose             compose.ComposeStack
-	gatewayURL          string
-	gatewayURLB         string
-	gatewayURLRealIP    string
-	gatewayURLNoTrust   string
-	gatewayURLMemOpen   string
-	gatewayURLConc      string
-	operatorURLs        map[string]string
-	natsURL             string
+	compose           compose.ComposeStack
+	gatewayURL        string
+	gatewayURLB       string
+	gatewayURLRealIP  string
+	gatewayURLNoTrust string
+	gatewayURLMemOpen string
+	gatewayURLConc    string
+	operatorURLs      map[string]string
+	natsURL           string
 }
 
 // startStack brings the Compose stack up exactly once per test process.
@@ -120,15 +120,15 @@ func startStack(ctx context.Context) (*liveStack, error) {
 	}
 
 	return &liveStack{
-		compose:             c,
-		gatewayURL:          urlA,
-		gatewayURLB:         urlB,
-		gatewayURLRealIP:    urlRealIP,
-		gatewayURLNoTrust:   urlNoTrust,
-		gatewayURLMemOpen:   urlMemOpen,
-		gatewayURLConc:      urlConc,
-		operatorURLs:        operatorURLs,
-		natsURL:             natsURL,
+		compose:           c,
+		gatewayURL:        urlA,
+		gatewayURLB:       urlB,
+		gatewayURLRealIP:  urlRealIP,
+		gatewayURLNoTrust: urlNoTrust,
+		gatewayURLMemOpen: urlMemOpen,
+		gatewayURLConc:    urlConc,
+		operatorURLs:      operatorURLs,
+		natsURL:           natsURL,
 	}, nil
 }
 
