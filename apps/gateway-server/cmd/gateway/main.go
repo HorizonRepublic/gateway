@@ -145,6 +145,8 @@ func main() {
 		FailureThreshold: cfg.CircuitBreakerFailureThreshold,
 		RecoveryTimeout:  cfg.CircuitBreakerRecoveryTimeout,
 		HalfOpenProbes:   cfg.CircuitBreakerHalfOpenProbes,
+		// Per-service breaker map cardinality cap; see ResilientConfig.
+		MaxBreakerSubjects: cfg.CircuitBreakerMaxSubjects,
 	}, logger)
 	handler := buildProxyHandler(cfg, currentTable, resilient, rlRouter, logger)
 	httpServer, err := httptransport.NewServer(
