@@ -154,8 +154,17 @@ type Config struct {
 	// using creds-file or no auth.
 	NATSUser string `env:"NATS_USER"`
 	// NATSPassword is the NATS password for password auth. Leave empty
-	// if using creds-file or no auth.
-	NATSPassword string `env:"NATS_PASSWORD"`
+	// if using creds-file or no auth. Typed Secret so the value can
+	// never surface through fmt/JSON/zerolog dumps of the Config;
+	// consumers read it via Reveal() at the point of use.
+	NATSPassword Secret `env:"NATS_PASSWORD"`
+	// NATSPasswordFile is a filesystem path holding the NATS password
+	// (Kubernetes/Docker secret-mount pattern). When set, the file
+	// content REPLACES NATSPassword regardless of whether the plain
+	// env variable is also present — file indirection is the more
+	// deliberate operator act. Trailing newlines are trimmed; an
+	// unreadable or empty file fails startup closed.
+	NATSPasswordFile string `env:"NATS_PASSWORD_FILE"`
 	// NATSCredsFile is the filesystem path to an NKey credentials file,
 	// used for NGS / decentralised JWT auth.
 	NATSCredsFile string `env:"NATS_CREDS_FILE"`
@@ -336,6 +345,18 @@ func Load() (*Config, error) {
 			"(unknown header)", cfg.TrustedProxyHeader)
 	}
 	cfg.TrustedProxyHeader = canonical
+
+	// Secret-file indirection resolves before any validation that
+	// might one day inspect the credential. File content wins over the
+	// plain env variable; a broken mount aborts startup instead of
+	// degrading to whatever NATS_PASSWORD happened to hold.
+	if cfg.NATSPasswordFile != "" {
+		secret, err := readSecretFile(cfg.NATSPasswordFile)
+		if err != nil {
+			return nil, fmt.Errorf("NATS_PASSWORD_FILE=%q: %w", cfg.NATSPasswordFile, err)
+		}
+		cfg.NATSPassword = secret
+	}
 
 	switch cfg.RateLimitFailPolicy {
 	case "open", "closed":

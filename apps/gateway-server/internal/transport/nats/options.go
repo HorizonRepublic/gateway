@@ -98,7 +98,7 @@ func BuildOptions(cfg *config.Config, logger zerolog.Logger) []natsgo.Option {
 	if cfg.NATSCredsFile != "" {
 		opts = append(opts, natsgo.UserCredentials(cfg.NATSCredsFile))
 	} else if cfg.NATSUser != "" {
-		opts = append(opts, natsgo.UserInfo(cfg.NATSUser, cfg.NATSPassword))
+		opts = append(opts, natsgo.UserInfo(cfg.NATSUser, cfg.NATSPassword.Reveal()))
 	}
 
 	return opts
