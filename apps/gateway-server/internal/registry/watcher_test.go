@@ -122,12 +122,12 @@ type fakeKVEntry struct {
 	op    jetstream.KeyValueOp
 }
 
-func (e *fakeKVEntry) Bucket() string              { return "handler_registry" }
-func (e *fakeKVEntry) Key() string                 { return e.key }
-func (e *fakeKVEntry) Value() []byte               { return e.value }
-func (e *fakeKVEntry) Revision() uint64            { return 0 }
-func (e *fakeKVEntry) Created() time.Time          { return time.Time{} }
-func (e *fakeKVEntry) Delta() uint64               { return 0 }
+func (e *fakeKVEntry) Bucket() string                  { return "handler_registry" }
+func (e *fakeKVEntry) Key() string                     { return e.key }
+func (e *fakeKVEntry) Value() []byte                   { return e.value }
+func (e *fakeKVEntry) Revision() uint64                { return 0 }
+func (e *fakeKVEntry) Created() time.Time              { return time.Time{} }
+func (e *fakeKVEntry) Delta() uint64                   { return 0 }
 func (e *fakeKVEntry) Operation() jetstream.KeyValueOp { return e.op }
 
 // newWatcherWithFake wires a Watcher against the given fake KV without

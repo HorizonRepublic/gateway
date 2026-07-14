@@ -497,7 +497,7 @@ func (s *NATSKVStore) Counters() map[string]int64 {
 		"ratelimit_natskv_cas_retries_total":           s.counters.casRetries.Load(),
 		"ratelimit_natskv_budget_exhausted_total":      s.counters.budgetExhausted.Load(),
 		"ratelimit_natskv_cas_attempts_exceeded_total": s.counters.casAttemptsExceeded.Load(),
-		"ratelimit_natskv_circuit_state":         s.counters.circuitState.Load(),
+		"ratelimit_natskv_circuit_state":               s.counters.circuitState.Load(),
 		"ratelimit_natskv_breaker_transitions_total":   s.counters.breakerTransitions.Load(),
 		"ratelimit_natskv_circuit_rejected_total":      s.counters.circuitRejected.Load(),
 		"ratelimit_natskv_corrupt_tat_total":           s.counters.corruptTAT.Load(),

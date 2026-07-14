@@ -55,4 +55,3 @@ func TestAcquireReleaseCycle_ResetsPriorState(t *testing.T) {
 	assert.NotContains(t, second.Params, "leaked")
 	assert.NotContains(t, second.Headers, "x-leaked")
 }
-
