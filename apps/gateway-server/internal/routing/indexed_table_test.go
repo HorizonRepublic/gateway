@@ -7,7 +7,7 @@ import (
 )
 
 func TestLinearTable_ExactMatch(t *testing.T) {
-	table := newLinearTable()
+	table := newIndexedTable()
 	table.add(Route{
 		Subject:      "users-svc__microservice.cmd.users.list",
 		Method:       "GET",
@@ -21,7 +21,7 @@ func TestLinearTable_ExactMatch(t *testing.T) {
 }
 
 func TestLinearTable_PathParamMatch(t *testing.T) {
-	table := newLinearTable()
+	table := newIndexedTable()
 	table.add(Route{
 		Subject:      "users-svc__microservice.cmd.users.get",
 		Method:       "GET",
@@ -35,7 +35,7 @@ func TestLinearTable_PathParamMatch(t *testing.T) {
 }
 
 func TestLinearTable_MultipleParams(t *testing.T) {
-	table := newLinearTable()
+	table := newIndexedTable()
 	table.add(Route{
 		Subject:      "orders-svc__microservice.cmd.orders.item.get",
 		Method:       "GET",
@@ -49,7 +49,7 @@ func TestLinearTable_MultipleParams(t *testing.T) {
 }
 
 func TestLinearTable_MissReturnsFalse(t *testing.T) {
-	table := newLinearTable()
+	table := newIndexedTable()
 	table.add(Route{
 		Subject:      "users-svc__microservice.cmd.users.list",
 		Method:       "GET",
@@ -63,7 +63,7 @@ func TestLinearTable_MissReturnsFalse(t *testing.T) {
 }
 
 func TestLinearTable_MethodMismatch(t *testing.T) {
-	table := newLinearTable()
+	table := newIndexedTable()
 	table.add(Route{
 		Subject:      "users-svc__microservice.cmd.users.list",
 		Method:       "GET",
@@ -75,7 +75,7 @@ func TestLinearTable_MethodMismatch(t *testing.T) {
 }
 
 func TestLinearTable_DifferentPathSegmentCountNoMatch(t *testing.T) {
-	table := newLinearTable()
+	table := newIndexedTable()
 	table.add(Route{
 		Subject:      "users-svc__microservice.cmd.users.get",
 		Method:       "GET",
@@ -88,7 +88,7 @@ func TestLinearTable_DifferentPathSegmentCountNoMatch(t *testing.T) {
 }
 
 func TestLinearTable_Methods(t *testing.T) {
-	table := newLinearTable()
+	table := newIndexedTable()
 	table.add(Route{
 		Subject:      "users-svc__microservice.cmd.users.list",
 		Method:       "GET",
