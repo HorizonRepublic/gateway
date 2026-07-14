@@ -370,6 +370,13 @@ func (h *Handler) serve(ctx context.Context, in *ServeInput, obs *requestOutcome
 		if isTimeoutErr(err) {
 			return mergeRateLimitHeaders(toServeResult(gerrors.GatewayTimeout), rlHeaders)
 		}
+		if isPayloadTooLargeErr(err) {
+			// Client-side max_payload rejection: the envelope never
+			// touched the wire, so this is a request-shape problem
+			// (413), not upstream degradation (503).
+			reqLog.Warn().Err(err).Str("subject", route.Subject).Msg("nats request exceeds max_payload")
+			return mergeRateLimitHeaders(toServeResult(gerrors.ContentTooLarge), rlHeaders)
+		}
 		reqLog.Error().Err(err).Str("subject", route.Subject).Msg("nats request failed")
 		return mergeRateLimitHeaders(toServeResult(gerrors.ServiceUnavailable), rlHeaders)
 	}
@@ -980,6 +987,18 @@ func (h *Handler) runAuthFlow(
 	if err != nil {
 		if isTimeoutErr(err) {
 			return &authFlowResult{Proceed: false, ShortCircuit: toServeResult(gerrors.GatewayTimeout)}
+		}
+		if isPayloadTooLargeErr(err) {
+			// The verify envelope carries no body, so only extreme
+			// header/query inflation lands here — still a request-
+			// shape problem, mapped to 413 for consistency with the
+			// main route branch.
+			reqLog.Warn().
+				Err(err).
+				Str("subject", route.Auth.VerifierSubject).
+				Msg("auth: verifier request exceeds max_payload")
+
+			return &authFlowResult{Proceed: false, ShortCircuit: toServeResult(gerrors.ContentTooLarge)}
 		}
 		reqLog.Error().
 			Err(err).

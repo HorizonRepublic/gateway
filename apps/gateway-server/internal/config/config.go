@@ -84,8 +84,18 @@ type Config struct {
 	// between requests before the server closes it.
 	IdleTimeout time.Duration `env:"HTTP_IDLE_TIMEOUT"  envDefault:"120s"`
 	// MaxBodyBytes is the maximum accepted request body size in bytes.
-	// Requests exceeding this are rejected with 413 Payload Too Large.
-	MaxBodyBytes int64 `env:"HTTP_MAX_BODY_BYTES"   envDefault:"1048576"`
+	// Requests exceeding this are rejected with 413 Content Too Large.
+	//
+	// The default is 960 KiB — deliberately BELOW the NATS server's
+	// default max_payload (1 MiB) — because the gateway forwards the
+	// body inside a JSON envelope that also carries headers, query,
+	// params, and meta. A body cap equal to max_payload would let
+	// near-cap requests pass the HTTP guard and then deterministically
+	// fail at NATS publish time. The bootstrap validates the pairing
+	// against the live server's max_payload at startup (see
+	// transport/nats.ValidatePayloadBudget); raise this knob only
+	// together with the NATS server's max_payload.
+	MaxBodyBytes int64 `env:"HTTP_MAX_BODY_BYTES"   envDefault:"983040"`
 	// MaxHeaderBytes is the maximum accepted request header size in
 	// bytes, summed across all headers.
 	MaxHeaderBytes int `env:"HTTP_MAX_HEADER_BYTES" envDefault:"16384"`

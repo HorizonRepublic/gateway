@@ -20,6 +20,7 @@ func TestHTTPError_StatusAndBodyPaired(t *testing.T) {
 		{"NotFound", NotFound, StatusNotFound},
 		{"MethodNotAllowed", MethodNotAllowed, StatusMethodNotAllowed},
 		{"TooManyRequests", TooManyRequests, StatusTooManyRequests},
+		{"ContentTooLarge", ContentTooLarge, StatusContentTooLarge},
 		{"InternalError", InternalError, StatusInternalError},
 		{"ServiceUnavailable", ServiceUnavailable, StatusServiceUnavailable},
 		{"GatewayTimeout", GatewayTimeout, StatusGatewayTimeout},
@@ -41,7 +42,7 @@ func TestHTTPError_StatusAndBodyPaired(t *testing.T) {
 // implementation-identifying leak.
 func TestHTTPError_BodiesAreSingleFieldObjects(t *testing.T) {
 	errs := []HTTPError{
-		NotFound, MethodNotAllowed,
+		NotFound, MethodNotAllowed, ContentTooLarge,
 		TooManyRequests, InternalError, ServiceUnavailable, GatewayTimeout, BadGateway,
 	}
 	for _, e := range errs {
@@ -66,6 +67,7 @@ func TestHTTPError_ReasonPhrases(t *testing.T) {
 		{"NotFound", NotFound, "Not Found"},
 		{"MethodNotAllowed", MethodNotAllowed, "Method Not Allowed"},
 		{"TooManyRequests", TooManyRequests, "Too Many Requests"},
+		{"ContentTooLarge", ContentTooLarge, "Content Too Large"},
 		{"InternalError", InternalError, "Internal Server Error"},
 		{"ServiceUnavailable", ServiceUnavailable, "Service Unavailable"},
 		{"GatewayTimeout", GatewayTimeout, "Gateway Timeout"},

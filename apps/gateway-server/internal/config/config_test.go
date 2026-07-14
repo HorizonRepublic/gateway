@@ -28,7 +28,11 @@ func TestLoad_AppliesDefaultsWhenOnlyRequiredSet(t *testing.T) {
 	assert.Equal(t, 10*time.Second, cfg.ReadTimeout)
 	assert.Equal(t, 35*time.Second, cfg.WriteTimeout)
 	assert.Equal(t, 120*time.Second, cfg.IdleTimeout)
-	assert.Equal(t, int64(1048576), cfg.MaxBodyBytes)
+	// 960 KiB, not 1 MiB: the body cap must leave envelope headroom
+	// under the NATS default max_payload (1 MiB) — a cap equal to
+	// max_payload deterministically fails near-cap requests at NATS
+	// publish time (see transport/nats.ValidatePayloadBudget).
+	assert.Equal(t, int64(983040), cfg.MaxBodyBytes)
 	assert.Equal(t, 16384, cfg.MaxHeaderBytes)
 
 	assert.True(t, cfg.NATSRandomizeUrls)

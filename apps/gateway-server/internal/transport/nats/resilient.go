@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	natsgo "github.com/nats-io/nats.go"
 	"github.com/rs/zerolog"
 	"github.com/sony/gobreaker"
 	"golang.org/x/sync/semaphore"
@@ -268,11 +269,19 @@ func (r *ResilientRequester) newBreaker(name string) *gobreaker.CircuitBreaker {
 		// let a burst of impatient clients open the breaker for a
 		// perfectly healthy service. context.DeadlineExceeded (the
 		// route timeout fired while the upstream stayed silent) is
-		// genuine upstream sickness and still counts. The error is
-		// returned to the caller either way — IsSuccessful only
-		// affects breaker accounting, not response semantics.
+		// genuine upstream sickness and still counts.
+		// nats.ErrMaxPayload is likewise exempt: nats.go rejects
+		// over-limit messages client-side before they touch the wire,
+		// so the error describes the REQUEST's shape (mapped to 413
+		// upstream), not the target service's health — counting it
+		// would let one client looping oversized payloads open a
+		// healthy service's breaker. The error is returned to the
+		// caller either way — IsSuccessful only affects breaker
+		// accounting, not response semantics.
 		IsSuccessful: func(err error) bool {
-			return err == nil || errors.Is(err, context.Canceled)
+			return err == nil ||
+				errors.Is(err, context.Canceled) ||
+				errors.Is(err, natsgo.ErrMaxPayload)
 		},
 		OnStateChange: func(name string, from, to gobreaker.State) {
 			if to == gobreaker.StateOpen {

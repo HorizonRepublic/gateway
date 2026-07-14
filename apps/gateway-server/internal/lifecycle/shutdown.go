@@ -9,10 +9,13 @@
 //  2. The registry watcher — must stop its internal goroutine so it
 //     no longer attempts to replace the store snapshot after we have
 //     begun shutting down.
-//  3. The NATS connection(s) — Drain waits for in-flight subscriptions
-//     and publishes to finish before tearing down the socket, which
-//     is what gives the gateway its "no request left behind" guarantee
-//     during rolling deployments.
+//  3. The NATS connection(s) — Drain flushes in-flight subscriptions
+//     and publishes before tearing down the socket. nats.go's
+//     Conn.Drain only INITIATES that process (it returns immediately
+//     while a background goroutine finishes the drain and closes the
+//     connection), so the drain step here waits for the connection to
+//     report closed — that wait is what gives the gateway its "no
+//     request left behind" guarantee during rolling deployments.
 //  4. (Implicit) any per-request goroutines spawned by the Hertz
 //     handler — these are owned by Hertz and drained by its own
 //     Shutdown call.
