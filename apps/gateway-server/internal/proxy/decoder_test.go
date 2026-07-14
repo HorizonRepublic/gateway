@@ -36,7 +36,12 @@ func TestDefaultDecoder_RejectsInvalidJSON(t *testing.T) {
 func TestDefaultDecoder_RejectsOutOfRangeStatus(t *testing.T) {
 	dec := NewDefaultDecoder()
 
-	for _, status := range []int{0, 99, 600, 999} {
+	// 1xx statuses are interim responses (RFC 9110 §15.2) — never a
+	// valid FINAL status for a proxied exchange. Writing one as the
+	// sole response makes standards-compliant clients wait for the
+	// real response until their own timeout, so the decoder rejects
+	// them into the same fail-closed 502 path as other garbage.
+	for _, status := range []int{0, 99, 100, 101, 199, 600, 999} {
 		t.Run(strconv.Itoa(status), func(t *testing.T) {
 			payload := []byte(`{"status":` + strconv.Itoa(status) + `,"headers":{},"body":null}`)
 			_, err := dec.Decode(payload)

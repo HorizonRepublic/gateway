@@ -22,6 +22,16 @@ const (
 // across pool cycles by storing a pointer to the slice.
 const initialPayloadCap = 1024
 
+// maxPooledPayloadCap bounds the capacity of buffers returned to the
+// pool. Growth up to this cap is preserved across cycles so the
+// steady-state working set pays zero allocations; beyond it the
+// buffer is dropped on release and reclaimed by GC. Without the cap a
+// single multi-megabyte request body pins its backing array in the
+// pool indefinitely — N pool entries times the largest body ever seen
+// is unbounded RSS for no steady-state benefit. 64 KiB clears the
+// typical envelope P99 by well over an order of magnitude.
+const maxPooledPayloadCap = 64 << 10
+
 // envelopePool reuses GatewayRequest instances across requests. Every
 // acquired envelope is reset before use by acquireEnvelope and must be
 // returned via releaseEnvelope once the NATS reply has been processed.
@@ -46,12 +56,22 @@ func acquireEnvelope() *GatewayRequest {
 	return envelope
 }
 
-// releaseEnvelope returns an envelope to the pool. It is safe to call
-// with a nil receiver to simplify defer statements.
+// releaseEnvelope resets an envelope and returns it to the pool. It
+// is safe to call with a nil receiver to simplify defer statements.
+//
+// The reset happens on RELEASE (in addition to the acquire-side reset
+// that guards correctness) so an idle pooled envelope never retains
+// references to the last request's body, verifier claims, or header
+// strings — the verifier-path Headers map carries the raw
+// Authorization bearer token, and pinning credentials in pool memory
+// between requests widens the blast radius of any heap-disclosure
+// bug. The double reset is nearly free: after the release-side clear,
+// the acquire-side reset iterates empty maps.
 func releaseEnvelope(envelope *GatewayRequest) {
 	if envelope == nil {
 		return
 	}
+	envelope.reset()
 	envelopePool.Put(envelope)
 }
 
@@ -89,8 +109,14 @@ func acquirePayload() *[]byte {
 
 // releasePayload returns a payload buffer to the pool. Safe with a
 // nil pointer so defer statements can unconditionally release.
+// Buffers grown beyond maxPooledPayloadCap are dropped instead of
+// pooled — see the constant's documentation for the retention
+// rationale.
 func releasePayload(buf *[]byte) {
 	if buf == nil {
+		return
+	}
+	if cap(*buf) > maxPooledPayloadCap {
 		return
 	}
 	payloadPool.Put(buf)

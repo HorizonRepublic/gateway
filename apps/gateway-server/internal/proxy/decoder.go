@@ -6,11 +6,16 @@ import (
 	"github.com/HorizonRepublic/gateway/apps/gateway-server/internal/codec"
 )
 
-// Status range bounds taken from RFC 9110 §15. Values outside this
-// range are rejected as malformed because they are unparseable by
-// standards-compliant HTTP clients.
+// Status range bounds for a FINAL proxied response. The upper bound
+// is the RFC 9110 §15 ceiling; the lower bound starts at 200 because
+// 1xx codes are interim responses (RFC 9110 §15.2) that can never
+// terminate a request/reply exchange — a gateway writing `100
+// Continue` as the sole response leaves standards-compliant clients
+// hanging for the real response until their own timeout. A reply
+// envelope carrying a 1xx status is upstream garbage and takes the
+// same fail-closed 502 path as a status of 0 or 600.
 const (
-	minValidHTTPStatus = 100
+	minValidHTTPStatus = 200
 	maxValidHTTPStatus = 599
 )
 
@@ -38,7 +43,8 @@ var _ Decoder = (*DefaultDecoder)(nil)
 
 // Decode parses replyBytes into a GatewayReply.
 //
-// Validates that status is within the RFC 9110 status range (100-599).
+// Validates that status is a final-response status (200-599; 1xx is
+// interim per RFC 9110 §15.2 and can never be relayed as a NATS reply).
 // Out-of-range or unparseable payloads produce an error so the caller
 // can return a 502 Bad Gateway upstream rather than forwarding garbage
 // to the HTTP client.
