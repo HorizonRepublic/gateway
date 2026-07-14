@@ -113,8 +113,14 @@ func parseCIDRs(entries []string) ([]*net.IPNet, error) {
 //     cannot vouch for headers it attached. This is the spoofing
 //     defence.
 //  2. If peerIP is trusted → walk XFF right-to-left. Skip trusted
-//     IPs and malformed entries. Return the first untrusted IP.
-//  3. Fallback (empty XFF, all-trusted chain, all entries malformed,
+//     IPs. Return the first untrusted IP. An entry that does not
+//     parse as an IP (see parseForwardedEntry for the accepted
+//     forms) terminates the walk fail-closed: entries further left
+//     were written by parties the chain of trusted proxies cannot
+//     vouch for, so continuing past an unparseable hop would let an
+//     attacker-supplied prefix win. RFC 7239 §6 "unknown" and
+//     obfuscated node identifiers land on this path by design.
+//  3. Fallback (empty XFF, all-trusted chain, unparseable boundary,
 //     chain exceeds MaxHops) → return peerIP.String().
 //
 // IPv4-mapped IPv6 peer addresses (e.g. ::ffff:10.0.0.1) are
@@ -136,9 +142,12 @@ func ResolveClientIP(peerIP net.IP, xff string, trusted []*net.IPNet) string {
 	// the gateway, and we want the first untrusted entry going
 	// backwards through the chain.
 	for i := len(entries) - 1; i >= 0; i-- {
-		candidate := net.ParseIP(entries[i])
+		candidate := parseForwardedEntry(entries[i])
 		if candidate == nil {
-			continue
+			// Fail closed: this hop is the boundary of data the
+			// trusted chain can vouch for. Walking past it would
+			// resolve identity from attacker-controlled entries.
+			return peerStr
 		}
 		if !ipIn(candidate, trusted) {
 			return candidate.String()
@@ -146,6 +155,36 @@ func ResolveClientIP(peerIP net.IP, xff string, trusted []*net.IPNet) string {
 	}
 
 	return peerStr
+}
+
+// parseForwardedEntry parses a single X-Forwarded-For list entry into
+// an IP. Accepted forms, in probe order:
+//
+//   - bare IPv4/IPv6 ("203.0.113.9", "2001:db8::1") — the canonical
+//     XFF entry shape;
+//   - host:port with an IP host ("203.0.113.9:51234",
+//     "[2001:db8::1]:443") — the RFC 7239 §6 node form, emitted by
+//     proxies that record the peer socket instead of the bare
+//     address (Azure Application Gateway, IIS/ARR);
+//   - bracketed IPv6 without a port ("[2001:db8::1]").
+//
+// Anything else — RFC 7239 "unknown", obfuscated "_hidden" nodes,
+// plain garbage — returns nil, which the caller treats as the
+// untrusted boundary of the chain.
+func parseForwardedEntry(entry string) net.IP {
+	if ip := net.ParseIP(entry); ip != nil {
+		return ip
+	}
+
+	if host, _, err := net.SplitHostPort(entry); err == nil {
+		return net.ParseIP(host)
+	}
+
+	if strings.HasPrefix(entry, "[") && strings.HasSuffix(entry, "]") {
+		return net.ParseIP(entry[1 : len(entry)-1])
+	}
+
+	return nil
 }
 
 // ResolveClientIPSingle returns the client IP for a single-value

@@ -73,21 +73,25 @@ type Config struct {
 	// WriteTimeout bounds how long the server will take to write the
 	// full response back to the client before forcibly closing.
 	//
-	// INVARIANT: WriteTimeout MUST be strictly greater than
-	// RequestTimeout. When a request hits the RequestTimeout deadline
-	// the handler writes a 504 response; if the underlying HTTP write
-	// deadline has already expired, the 504 is truncated or dropped on
-	// the wire. Operators should keep several seconds of slack between
-	// the two (the defaults are 35s vs 30s).
+	// INVARIANT (enforced at Load): WriteTimeout MUST be strictly
+	// greater than RequestTimeout. When a request hits the
+	// RequestTimeout deadline the handler writes a 504 response; if
+	// the underlying HTTP write deadline has already expired, the 504
+	// is truncated or dropped on the wire. Operators should keep
+	// several seconds of slack between the two (the defaults are 35s
+	// vs 30s).
 	WriteTimeout time.Duration `env:"HTTP_WRITE_TIMEOUT" envDefault:"35s"`
 	// IdleTimeout bounds how long a keep-alive connection may sit
 	// between requests before the server closes it.
 	IdleTimeout time.Duration `env:"HTTP_IDLE_TIMEOUT"  envDefault:"120s"`
 	// MaxBodyBytes is the maximum accepted request body size in bytes.
 	// Requests exceeding this are rejected with 413 Payload Too Large.
+	// Zero disables the cap; negative values are rejected at Load().
 	MaxBodyBytes int64 `env:"HTTP_MAX_BODY_BYTES"   envDefault:"1048576"`
 	// MaxHeaderBytes is the maximum accepted request header size in
-	// bytes, summed across all headers.
+	// bytes, summed across all headers. Must be > 0 — the HTTP layer
+	// treats a non-positive value as "no header cap", which removes
+	// the oversized-header defence, so Load() rejects it.
 	MaxHeaderBytes int `env:"HTTP_MAX_HEADER_BYTES" envDefault:"16384"`
 
 	// HTTPMaxConcurrentRequests caps the number of HTTP requests
@@ -185,6 +189,12 @@ type Config struct {
 	// traffic — in Kubernetes this port stays off the public
 	// Service/Ingress, so every operator endpoint is private by
 	// construction.
+	//
+	// Load() compares this against HTTPAddr after host:port
+	// normalisation (":8080", "0.0.0.0:8080", and "[::]:8080" all
+	// denote the same wildcard socket) and rejects collisions, so a
+	// differently-spelled duplicate cannot reach the runtime bind
+	// race.
 	OperatorHTTPAddr string `env:"OPERATOR_HTTP_ADDR" envDefault:":8081"`
 
 	// NATSMaxInflight caps concurrent in-flight NATS requests across
@@ -253,6 +263,12 @@ type Config struct {
 	RequestTimeout time.Duration `env:"REQUEST_TIMEOUT"  envDefault:"30s"`
 	// ShutdownTimeout bounds how long the graceful-shutdown sequence
 	// waits for in-flight requests to finish before force-closing.
+	//
+	// Must be > 0; there is no "unlimited" sentinel. A non-positive
+	// value would make the drain context born-expired, so SIGTERM
+	// would force-drop every in-flight request instead of draining —
+	// the exact opposite of what "0 = no limit" suggests. Load()
+	// rejects it.
 	ShutdownTimeout time.Duration `env:"SHUTDOWN_TIMEOUT" envDefault:"30s"`
 
 	// RateLimitFailPolicy selects behavior when the distributed
@@ -415,8 +431,58 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("HTTP_MAX_CONCURRENT_REQUESTS must be ≥ 0 (0 disables the cap), got %d", cfg.HTTPMaxConcurrentRequests)
 	}
 
-	if cfg.OperatorHTTPAddr == "" || cfg.OperatorHTTPAddr == cfg.HTTPAddr {
-		return nil, fmt.Errorf("OPERATOR_HTTP_ADDR must be non-empty and differ from HTTP_ADDR (operator surfaces never share the public socket), got %q", cfg.OperatorHTTPAddr)
+	if cfg.ReadTimeout <= 0 {
+		return nil, fmt.Errorf("HTTP_READ_TIMEOUT must be > 0, got %s", cfg.ReadTimeout)
+	}
+
+	if cfg.WriteTimeout <= 0 {
+		return nil, fmt.Errorf("HTTP_WRITE_TIMEOUT must be > 0, got %s", cfg.WriteTimeout)
+	}
+
+	if cfg.IdleTimeout <= 0 {
+		return nil, fmt.Errorf("HTTP_IDLE_TIMEOUT must be > 0, got %s", cfg.IdleTimeout)
+	}
+
+	if cfg.RequestTimeout <= 0 {
+		return nil, fmt.Errorf("REQUEST_TIMEOUT must be > 0, got %s", cfg.RequestTimeout)
+	}
+
+	if cfg.WriteTimeout <= cfg.RequestTimeout {
+		return nil, fmt.Errorf("HTTP_WRITE_TIMEOUT (%s) must be strictly greater than REQUEST_TIMEOUT (%s) — the 504 written at the request deadline must still fit inside the HTTP write deadline", cfg.WriteTimeout, cfg.RequestTimeout)
+	}
+
+	if cfg.ShutdownTimeout <= 0 {
+		return nil, fmt.Errorf("SHUTDOWN_TIMEOUT must be > 0 (there is no \"unlimited\" sentinel — a non-positive value pre-expires the drain context and force-drops in-flight requests), got %s", cfg.ShutdownTimeout)
+	}
+
+	if cfg.MaxBodyBytes < 0 {
+		return nil, fmt.Errorf("HTTP_MAX_BODY_BYTES must be ≥ 0 (0 disables the cap), got %d", cfg.MaxBodyBytes)
+	}
+
+	if cfg.MaxHeaderBytes <= 0 {
+		return nil, fmt.Errorf("HTTP_MAX_HEADER_BYTES must be > 0 (non-positive values disable the header cap entirely), got %d", cfg.MaxHeaderBytes)
+	}
+
+	if cfg.NATSReconnectWait <= 0 {
+		return nil, fmt.Errorf("NATS_RECONNECT_WAIT must be > 0, got %s", cfg.NATSReconnectWait)
+	}
+
+	if cfg.OperatorHTTPAddr == "" {
+		return nil, fmt.Errorf("OPERATOR_HTTP_ADDR must be non-empty (operator surfaces never share the public socket)")
+	}
+
+	publicAddr, err := parseListenAddr("HTTP_ADDR", cfg.HTTPAddr)
+	if err != nil {
+		return nil, err
+	}
+
+	operatorAddr, err := parseListenAddr("OPERATOR_HTTP_ADDR", cfg.OperatorHTTPAddr)
+	if err != nil {
+		return nil, err
+	}
+
+	if publicAddr.collidesWith(operatorAddr) {
+		return nil, fmt.Errorf("OPERATOR_HTTP_ADDR=%q binds the same socket as HTTP_ADDR=%q (operator surfaces never share the public socket)", cfg.OperatorHTTPAddr, cfg.HTTPAddr)
 	}
 
 	if cfg.NATSMaxInflight < 0 {
@@ -446,6 +512,71 @@ func Load() (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// listenAddr is the normalised form of a host:port listen address used
+// for socket-collision comparison at Load() time.
+type listenAddr struct {
+	// host is the canonical IP string (via net.IP.String()) or the
+	// lowercased hostname. Empty when wildcard is set.
+	host string
+	// wildcard marks all-interfaces binds: an empty host (":8080"),
+	// 0.0.0.0, or ::. All wildcard spellings are treated as one
+	// socket per port — the kernel refuses the second bind anyway.
+	wildcard bool
+	// port is the resolved numeric TCP port.
+	port int
+}
+
+// collidesWith reports whether binding both addresses would race for
+// the same socket: same port, and either side binds all interfaces or
+// both name the same host. Hostnames are compared textually (no DNS
+// resolution at validation time), so "localhost" vs "127.0.0.1" passes
+// here and surfaces at bind time instead.
+func (a listenAddr) collidesWith(b listenAddr) bool {
+	if a.port != b.port {
+		return false
+	}
+
+	return a.wildcard || b.wildcard || a.host == b.host
+}
+
+// parseListenAddr normalises a listen address for collision
+// comparison. Fail-closed: an address net.Listen could not parse
+// aborts startup here, with an error naming the env var, instead of
+// dying later inside a server goroutine whose error is only logged.
+func parseListenAddr(envName, addr string) (listenAddr, error) {
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		return listenAddr{}, fmt.Errorf("%s=%q is not a valid host:port listen address: %w", envName, addr, err)
+	}
+
+	port, err := net.LookupPort("tcp", portStr)
+	if err != nil {
+		return listenAddr{}, fmt.Errorf("%s=%q has an invalid port %q: %w", envName, addr, portStr, err)
+	}
+
+	out := listenAddr{port: port}
+
+	if host == "" {
+		out.wildcard = true
+
+		return out, nil
+	}
+
+	if ip := net.ParseIP(host); ip != nil {
+		if ip.IsUnspecified() {
+			out.wildcard = true
+		} else {
+			out.host = ip.String()
+		}
+
+		return out, nil
+	}
+
+	out.host = strings.ToLower(host)
+
+	return out, nil
 }
 
 // IsProduction reports whether the gateway is running with Environment

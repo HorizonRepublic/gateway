@@ -3,8 +3,10 @@ package http
 import (
 	"context"
 	"net"
+	"strings"
 
 	"github.com/cloudwego/hertz/pkg/app"
+	"github.com/cloudwego/hertz/pkg/protocol"
 
 	"github.com/HorizonRepublic/gateway/apps/gateway-server/internal/trustedproxy"
 )
@@ -43,22 +45,62 @@ const xForwardedForHeader = "X-Forwarded-For"
 // empty string, the adapter's fallback path invokes ctx.ClientIP(),
 // and the request still serves.
 func newTrustedProxyMiddleware(trusted []*net.IPNet, headerName string) app.HandlerFunc {
-	headerBytes := []byte(headerName)
 	multiHop := headerName == xForwardedForHeader
 
 	return func(_ context.Context, ctx *app.RequestContext) {
 		peerIP := extractPeerIP(ctx.RemoteAddr())
-		raw := string(ctx.Request.Header.Peek(string(headerBytes)))
 
 		var resolved string
 		if multiHop {
-			resolved = trustedproxy.ResolveClientIP(peerIP, raw, trusted)
+			xff := joinFieldLines(&ctx.Request.Header, headerName)
+			resolved = trustedproxy.ResolveClientIP(peerIP, xff, trusted)
 		} else {
+			raw := string(ctx.Request.Header.Peek(headerName))
 			resolved = trustedproxy.ResolveClientIPSingle(peerIP, raw, trusted)
 		}
 
 		ctx.Set(clientIPUserKey, resolved)
 	}
+}
+
+// joinFieldLines returns the value of every field line named name,
+// joined with ", " per RFC 9110 §5.3: repeated field lines are
+// semantically one comma-separated list, and the trust walk MUST see
+// the whole list. Reading only the first line would let an attacker
+// smuggle a spoofed X-Forwarded-For line past a trusted proxy that
+// records the genuine client on a separate line (HAProxy `option
+// forwardfor` appends a new line when one is already present). The
+// adapter joins repeated header lines the same way when building the
+// upstream envelope, so the trust decision and the forwarded header
+// agree on the same request.
+//
+// The zero- and one-line paths stay allocation-lean: no join buffer,
+// exactly one string copy of the single value. The multi-line join is
+// a rare path — one sized strings.Builder pass.
+func joinFieldLines(h *protocol.RequestHeader, name string) string {
+	lines := h.PeekAll(name)
+	switch len(lines) {
+	case 0:
+		return ""
+	case 1:
+		return string(lines[0])
+	}
+
+	size := 0
+	for _, line := range lines {
+		size += len(line) + 2 // + ", " separator budget
+	}
+
+	var b strings.Builder
+	b.Grow(size)
+	for i, line := range lines {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		b.Write(line)
+	}
+
+	return b.String()
 }
 
 // extractPeerIP pulls the IP portion out of a net.Addr. For TCP

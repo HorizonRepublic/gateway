@@ -132,10 +132,10 @@ func TestTrustedProxyMiddleware_IPv6Chain_Resolves(t *testing.T) {
 	assert.Equal(t, "2001:db8::1", got)
 }
 
-// TestTrustedProxyMiddleware_MalformedXFF_SkipsGarbage pins the
-// resilience path: malformed XFF entries are skipped, the walk
-// continues to the next valid one.
-func TestTrustedProxyMiddleware_MalformedXFF_SkipsGarbage(t *testing.T) {
+// TestTrustedProxyMiddleware_MalformedXFFLeftOfClient_Irrelevant pins
+// that the walk resolves at the rightmost untrusted entry — garbage
+// further left is never consulted.
+func TestTrustedProxyMiddleware_MalformedXFFLeftOfClient_Irrelevant(t *testing.T) {
 	middleware := newTrustedProxyMiddleware(testTrusted(t), xForwardedForHeader)
 
 	ctx := ut.CreateUtRequestContext("GET", "https://gateway.test/x", nil,
@@ -147,6 +147,86 @@ func TestTrustedProxyMiddleware_MalformedXFF_SkipsGarbage(t *testing.T) {
 
 	got, _ := clientIPFromCtx(t, ctx)
 	assert.Equal(t, "1.2.3.4", got)
+}
+
+// TestTrustedProxyMiddleware_MalformedRightmostXFF_FailsClosedToPeer
+// pins the fail-closed boundary end to end: an unparseable rightmost
+// hop terminates the walk and the peer IP is stamped — the
+// attacker-prepended entry never wins.
+func TestTrustedProxyMiddleware_MalformedRightmostXFF_FailsClosedToPeer(t *testing.T) {
+	middleware := newTrustedProxyMiddleware(testTrusted(t), xForwardedForHeader)
+
+	ctx := ut.CreateUtRequestContext("GET", "https://gateway.test/x", nil,
+		ut.Header{Key: "X-Forwarded-For", Value: "6.6.6.6, garbage"},
+	)
+	attachRemote(ctx, &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 54321})
+
+	middleware(context.Background(), ctx)
+
+	got, _ := clientIPFromCtx(t, ctx)
+	assert.Equal(t, "127.0.0.1", got,
+		"unparseable hop terminates the walk fail-closed to the peer")
+}
+
+// TestTrustedProxyMiddleware_PortSuffixedXFFEntry_ResolvesHost pins
+// the ip:port entry form emitted by socket-recording proxies (Azure
+// Application Gateway, IIS/ARR): the genuine client entry resolves,
+// the attacker-prepended one is never reached.
+func TestTrustedProxyMiddleware_PortSuffixedXFFEntry_ResolvesHost(t *testing.T) {
+	middleware := newTrustedProxyMiddleware(testTrusted(t), xForwardedForHeader)
+
+	ctx := ut.CreateUtRequestContext("GET", "https://gateway.test/x", nil,
+		ut.Header{Key: "X-Forwarded-For", Value: "6.6.6.6, 203.0.113.9:51234"},
+	)
+	attachRemote(ctx, &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 54321})
+
+	middleware(context.Background(), ctx)
+
+	got, _ := clientIPFromCtx(t, ctx)
+	assert.Equal(t, "203.0.113.9", got)
+}
+
+// TestTrustedProxyMiddleware_RepeatedXFFLines_JoinedBeforeWalk pins
+// the RFC 9110 §5.3 field-line contract: repeated X-Forwarded-For
+// lines are semantically one comma-separated list and the trust walk
+// MUST see all of them. Scenario: the attacker ships its own XFF
+// line; the trusted proxy appends the genuine client as a SEPARATE
+// line (HAProxy `option forwardfor` behaviour). Reading only the
+// first line would resolve the attacker's 6.6.6.6.
+func TestTrustedProxyMiddleware_RepeatedXFFLines_JoinedBeforeWalk(t *testing.T) {
+	middleware := newTrustedProxyMiddleware(testTrusted(t), xForwardedForHeader)
+
+	ctx := ut.CreateUtRequestContext("GET", "https://gateway.test/x", nil,
+		ut.Header{Key: "X-Forwarded-For", Value: "6.6.6.6"},
+		ut.Header{Key: "X-Forwarded-For", Value: "203.0.113.9"},
+	)
+	attachRemote(ctx, &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 54321})
+
+	middleware(context.Background(), ctx)
+
+	got, _ := clientIPFromCtx(t, ctx)
+	assert.Equal(t, "203.0.113.9", got,
+		"all field lines join into one list; the rightmost (proxy-appended) entry wins")
+}
+
+// TestTrustedProxyMiddleware_RepeatedXFFLinesWithChains_JoinedInOrder
+// pins the join ordering across lines that each carry a chain: the
+// combined list is line 1 then line 2, and the rightmost-untrusted
+// walk runs over the whole thing.
+func TestTrustedProxyMiddleware_RepeatedXFFLinesWithChains_JoinedInOrder(t *testing.T) {
+	middleware := newTrustedProxyMiddleware(testTrusted(t), xForwardedForHeader)
+
+	ctx := ut.CreateUtRequestContext("GET", "https://gateway.test/x", nil,
+		ut.Header{Key: "X-Forwarded-For", Value: "9.9.9.9, 6.6.6.6"},
+		ut.Header{Key: "X-Forwarded-For", Value: "1.2.3.4, 10.0.0.5"},
+	)
+	attachRemote(ctx, &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 54321})
+
+	middleware(context.Background(), ctx)
+
+	got, _ := clientIPFromCtx(t, ctx)
+	assert.Equal(t, "1.2.3.4", got,
+		"trusted 10.0.0.5 skipped, walk resolves at 1.2.3.4 on the second field line")
 }
 
 // ---------- single-value forwarded-IP headers ----------
