@@ -1,0 +1,102 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Cancel superseded runs on the same PR; never cancel main builds.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    name: Go
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: apps/gateway-server
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: apps/gateway-server/go.mod
+          cache-dependency-path: apps/gateway-server/go.sum
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "gofmt needed on:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.11
+          working-directory: apps/gateway-server
+
+      - name: Unit tests
+        run: go test ./...
+
+      - name: Unit tests (race)
+        run: go test -race ./...
+
+      - name: Integration tests
+        run: go test -tags=integration ./...
+
+  ts:
+    name: TypeScript
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      # Version resolved from the packageManager field in package.json.
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Jest
+        run: pnpm exec nx run-many -t test
+
+      - name: ESLint
+        run: pnpm exec nx run-many -t lint
+
+  # Separate job so unit failures fail fast without paying for the
+  # compose stack build. The suite owns its docker compose lifecycle.
+  e2e:
+    name: E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [go, ts]
+    defaults:
+      run:
+        working-directory: apps/gateway-server
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: apps/gateway-server/go.mod
+          cache-dependency-path: apps/gateway-server/go.sum
+
+      - name: E2E tests
+        run: go test -tags=e2e -timeout=20m ./e2e/...
