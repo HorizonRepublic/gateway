@@ -287,6 +287,14 @@ type Config struct {
 	// LogFormat is the log output encoding: "json" for production or
 	// "console" for human-friendly colored output in local dev.
 	LogFormat string `env:"LOG_FORMAT"         envDefault:"json"`
+	// AccessLogEnabled controls the per-request structured access-log
+	// event (event=http.access) emitted at INFO when a request
+	// completes. Enabled by default — operators debugging a
+	// production incident need the request trail without a config
+	// change and restart. Disable only when an edge already captures
+	// equivalent access logs and the duplicate volume is a cost
+	// problem; metrics are unaffected by this knob.
+	AccessLogEnabled bool `env:"ACCESS_LOG_ENABLED" envDefault:"true"`
 
 	// Environment is a free-form deployment-tier label ("production",
 	// "staging", "development", ...). The gateway treats "production"

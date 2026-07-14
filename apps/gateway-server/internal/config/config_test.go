@@ -437,3 +437,27 @@ func TestLoad_OperatorAddrDefaultsAndValidation(t *testing.T) {
 	require.Error(t, err, "operator port must never equal the public port")
 	assert.Contains(t, err.Error(), "OPERATOR_HTTP_ADDR")
 }
+
+// TestLoad_AccessLogDefaultsToEnabled pins the production default:
+// operators get the request trail out of the box, no config change
+// required during an incident.
+func TestLoad_AccessLogDefaultsToEnabled(t *testing.T) {
+	setRequiredEnv(t)
+
+	cfg, err := Load()
+
+	require.NoError(t, err)
+	assert.True(t, cfg.AccessLogEnabled)
+}
+
+// TestLoad_AccessLogCanBeDisabled pins the off switch for
+// deployments whose edge already captures equivalent access logs.
+func TestLoad_AccessLogCanBeDisabled(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("ACCESS_LOG_ENABLED", "false")
+
+	cfg, err := Load()
+
+	require.NoError(t, err)
+	assert.False(t, cfg.AccessLogEnabled)
+}

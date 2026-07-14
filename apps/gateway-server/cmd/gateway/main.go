@@ -71,6 +71,11 @@ func main() {
 	retryCtx, cancelRetry := context.WithCancel(context.Background())
 	defer cancelRetry()
 
+	// Metrics are built before every other component so each can hook
+	// its own counters during construction. The registry is private —
+	// only the operator listener's /metrics endpoint serialises it.
+	metrics := observability.NewMetrics()
+
 	nc := connectNATSOrDie(cfg, logger)
 	js, kv := openKVOrDie(retryCtx, nc, cfg, logger)
 
@@ -78,10 +83,17 @@ func main() {
 	watcher := registry.NewWatcher(kv, store, logger)
 	currentTable := installRoutingRebuild(store, watcher, logger)
 
+	// Reload accounting registers BEFORE watcher.Start so the initial
+	// snapshot counts as the first reload — a gateway whose
+	// gateway_registry_reloads_total is still 0 after bootstrap is a
+	// gateway whose routing table never loaded.
+	watcher.OnChange(metrics.RecordRegistryReload)
+
 	rlRouter := ratelimit.NewRouter(
 		ratelimit.FailPolicy(cfg.RateLimitFailPolicy).Resolve(),
 		logger,
 	)
+	metrics.RegisterRateLimit(rlRouter.CountersAll)
 
 	// snapshotLanded latches true the moment the first watcher
 	// snapshot lands and stays true forever — operators rely on
@@ -146,7 +158,8 @@ func main() {
 		RecoveryTimeout:  cfg.CircuitBreakerRecoveryTimeout,
 		HalfOpenProbes:   cfg.CircuitBreakerHalfOpenProbes,
 	}, logger)
-	handler := buildProxyHandler(cfg, currentTable, resilient, rlRouter, logger)
+	metrics.RegisterNATS(resilient)
+	handler := buildProxyHandler(cfg, currentTable, resilient, rlRouter, metrics, logger)
 	httpServer, err := httptransport.NewServer(
 		cfg,
 		handler,
@@ -174,13 +187,13 @@ func main() {
 	}()
 	logger.Info().Str("addr", cfg.HTTPAddr).Msg("http server started")
 
-	operatorServer := httptransport.NewOperatorServer(cfg, readinessSignal)
+	operatorServer := httptransport.NewOperatorServer(cfg, readinessSignal, metrics.Handler())
 	go func() {
 		if err := operatorServer.Run(); err != nil {
 			logger.Error().Err(err).Msg("operator http server exited unexpectedly")
 		}
 	}()
-	logger.Info().Str("addr", cfg.OperatorHTTPAddr).Msg("operator http server started (probes)")
+	logger.Info().Str("addr", cfg.OperatorHTTPAddr).Msg("operator http server started (probes, metrics, pprof)")
 
 	sig := lifecycle.WaitForSignal()
 	logger.Info().Str("signal", sig.String()).Msg("shutdown signal received")
@@ -390,6 +403,7 @@ func buildProxyHandler(
 	currentTable *atomic.Value,
 	requester proxy.NatsRequester,
 	rlRouter *ratelimit.Router,
+	metrics *observability.Metrics,
 	logger zerolog.Logger,
 ) *proxy.Handler {
 	return proxy.NewHandler(proxy.HandlerConfig{
@@ -403,6 +417,8 @@ func buildProxyHandler(
 		Logger:           logger,
 		RateLimiter:      rlRouter,
 		RateLimitTimeout: cfg.RateLimitTimeout,
+		Metrics:          metrics,
+		AccessLog:        cfg.AccessLogEnabled,
 	})
 }
 
