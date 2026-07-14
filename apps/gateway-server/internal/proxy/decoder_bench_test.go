@@ -8,7 +8,7 @@ import "testing"
 // alone, not any per-iteration allocation inside the harness.
 func BenchmarkDecoder_Decode_SmallJSON(b *testing.B) {
 	decoder := NewDefaultDecoder()
-	payload := []byte(`{"status":201,"headers":{"x-custom":"yes"},"body":{"id":"42","name":"Alice"}}`)
+	payload := []byte(`{"status":201,"headers":{"x-custom":["yes"]},"body":{"id":"42","name":"Alice"}}`)
 
 	b.ResetTimer()
 	b.ReportAllocs()
