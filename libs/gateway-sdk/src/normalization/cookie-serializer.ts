@@ -248,6 +248,75 @@ const encodeCookieToken = (name: string): string => {
 };
 
 /**
+ * rfc6265bis §4.1.1 `path-value = *av-octet` where
+ * `av-octet = %x20-3A / %x3C-7E` — every printable US-ASCII octet
+ * except `;`. Anything outside this alphabet inside a Path attribute
+ * would terminate the attribute early and let the remainder of the
+ * string masquerade as further cookie attributes.
+ */
+const PATH_VALUE = /^[ -:<-~]*$/;
+
+/**
+ * rfc6265bis §4.1.1 `domain-value = <subdomain>` per RFC 1034 §3.5 as
+ * refined by RFC 1123 §2.1: dot-separated labels of letters, digits,
+ * and interior hyphens, 1–63 octets each. A single leading `.` is
+ * tolerated because rfc6265bis instructs UAs to ignore it.
+ */
+const DOMAIN_VALUE =
+  /^\.?[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/i;
+
+/**
+ * Fail-closed validation of the attributes that are interpolated into
+ * the `Set-Cookie` line verbatim. Name and value are percent-encoded
+ * on the way out, but `domain` / `path` must stay readable and are
+ * therefore validated against the rfc6265bis grammar instead: a `;`
+ * or control character in either would inject attacker-chosen cookie
+ * attributes (session-fixation scope widening). `expires` / `maxAge`
+ * are checked here too — `Max-Age=NaN` / `Expires=Invalid Date` are
+ * ignored by UAs, silently downgrading the cookie to browser-session
+ * lifetime.
+ *
+ * Throwing (rather than warn-and-drop) matches the module's
+ * registration-time fail-fast posture: every branch below is a caller
+ * bug, not a runtime condition to paper over.
+ */
+const assertWireSafeAttributes = (name: string, merged: ICookieOptions): void => {
+  if (merged.domain !== undefined && !DOMAIN_VALUE.test(merged.domain)) {
+    throw new Error(
+      `gateway: cookie ${name} has an invalid Domain attribute ` +
+        `(${JSON.stringify(merged.domain)}) — must be a host name per RFC 1123. ` +
+        `Domain is interpolated into the Set-Cookie line verbatim; rejecting ` +
+        `prevents cookie-attribute injection.`,
+    );
+  }
+
+  if (merged.path !== undefined && !PATH_VALUE.test(merged.path)) {
+    throw new Error(
+      `gateway: cookie ${name} has an invalid Path attribute ` +
+        `(${JSON.stringify(merged.path)}) — only printable US-ASCII except ';' is ` +
+        `allowed (rfc6265bis path-value grammar). Path is interpolated into the ` +
+        `Set-Cookie line verbatim; rejecting prevents cookie-attribute injection.`,
+    );
+  }
+
+  if (merged.expires !== undefined && Number.isNaN(merged.expires.getTime())) {
+    throw new Error(
+      `gateway: cookie ${name} has an invalid expires Date — serializing would ` +
+        `ship "Expires=Invalid Date", which UAs ignore, silently downgrading the ` +
+        `cookie to browser-session lifetime.`,
+    );
+  }
+
+  if (merged.maxAge !== undefined && !Number.isFinite(merged.maxAge)) {
+    throw new Error(
+      `gateway: cookie ${name} has a non-finite maxAge (${String(merged.maxAge)}) — ` +
+        `serializing would ship a non-numeric Max-Age, which UAs ignore, silently ` +
+        `downgrading the cookie to browser-session lifetime.`,
+    );
+  }
+};
+
+/**
  * rfc6265bis §5.6: a UA ignores the whole cookie when name + value
  * exceed 4096 octets. Another silent-drop class — surface it once per
  * cookie name instead of letting the operator chase a phantom session
@@ -279,6 +348,11 @@ const warnOversizedCookie = (name: string, encodedPair: string): void => {
  *                   `defaults` on a key-by-key basis.
  * @returns The serialized header value, ready to be stored in a reply
  *          envelope under `set-cookie`.
+ * @throws Error when `domain` or `path` violate the rfc6265bis attribute
+ *         grammar (cookie-attribute injection guard), when `expires` is an
+ *         invalid `Date`, or when `maxAge` is not finite. All four are
+ *         caller bugs that would otherwise ship a header the browser
+ *         either misparses or silently downgrades.
  * @remarks
  * `SameSite=None` requires `Secure` per the Cookies Living Standard. The
  * serializer enforces this with a production-default policy:
@@ -318,6 +392,8 @@ export const serializeCookie = (
   warnSameSiteNonePolicy(name, outcome);
 
   const merged = applyPrefixPolicy(name, applyPartitionedSecurePolicy(name, afterSameSite));
+
+  assertWireSafeAttributes(name, merged);
 
   const encodedName = encodeCookieToken(name);
   const encodedValue = TOKEN_SAFE.test(value) ? value : encodeURIComponent(value);
