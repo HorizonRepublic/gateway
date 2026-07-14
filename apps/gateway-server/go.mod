@@ -4,7 +4,7 @@ go 1.25.5
 
 require (
 	github.com/bytedance/sonic v1.15.2
-	github.com/caarlos0/env/v11 v11.4.0
+	github.com/caarlos0/env/v11 v11.4.1
 	github.com/cespare/xxhash/v2 v2.3.0
 	github.com/cloudwego/hertz v0.10.5
 	github.com/nats-io/nats.go v1.51.0
