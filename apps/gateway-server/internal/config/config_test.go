@@ -383,6 +383,8 @@ func TestLoad_ResilienceDefaults(t *testing.T) {
 	assert.Equal(t, uint32(10), cfg.CircuitBreakerFailureThreshold)
 	assert.Equal(t, 10*time.Second, cfg.CircuitBreakerRecoveryTimeout)
 	assert.Equal(t, uint32(1), cfg.CircuitBreakerHalfOpenProbes)
+	assert.Equal(t, 1024, cfg.CircuitBreakerMaxSubjects,
+		"per-service breaker map defaults to a bounded cardinality cap")
 }
 
 func TestLoad_ResilienceValidation(t *testing.T) {
@@ -397,6 +399,8 @@ func TestLoad_ResilienceValidation(t *testing.T) {
 		{"zero failure threshold", map[string]string{"CIRCUIT_BREAKER_FAILURE_THRESHOLD": "0"}, "CIRCUIT_BREAKER_FAILURE_THRESHOLD"},
 		{"zero recovery timeout", map[string]string{"CIRCUIT_BREAKER_RECOVERY_TIMEOUT": "0"}, "CIRCUIT_BREAKER_RECOVERY_TIMEOUT"},
 		{"zero half-open probes", map[string]string{"CIRCUIT_BREAKER_HALF_OPEN_PROBES": "0"}, "CIRCUIT_BREAKER_HALF_OPEN_PROBES"},
+		{"zero breaker subject cap", map[string]string{"CIRCUIT_BREAKER_MAX_SUBJECTS": "0"}, "CIRCUIT_BREAKER_MAX_SUBJECTS"},
+		{"negative breaker subject cap", map[string]string{"CIRCUIT_BREAKER_MAX_SUBJECTS": "-5"}, "CIRCUIT_BREAKER_MAX_SUBJECTS"},
 	}
 
 	for _, tc := range cases {

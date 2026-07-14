@@ -26,7 +26,7 @@ func TestBuildBucketKey_NATSKVSafe(t *testing.T) {
 	}
 }
 
-func noHeader(_ string) string { return "" }
+func noHeader(_ string) string         { return "" }
 func noCookie(_ string) (string, bool) { return "", false }
 
 func TestResolveKey_IPAlwaysResolves(t *testing.T) {

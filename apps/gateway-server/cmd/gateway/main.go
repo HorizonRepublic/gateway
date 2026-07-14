@@ -157,6 +157,8 @@ func main() {
 		FailureThreshold: cfg.CircuitBreakerFailureThreshold,
 		RecoveryTimeout:  cfg.CircuitBreakerRecoveryTimeout,
 		HalfOpenProbes:   cfg.CircuitBreakerHalfOpenProbes,
+		// Per-service breaker map cardinality cap; see ResilientConfig.
+		MaxBreakerSubjects: cfg.CircuitBreakerMaxSubjects,
 	}, logger)
 	metrics.RegisterNATS(resilient)
 	handler := buildProxyHandler(cfg, currentTable, resilient, rlRouter, metrics, logger)

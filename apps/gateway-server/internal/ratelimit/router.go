@@ -49,8 +49,8 @@ type Router struct {
 	// request — only the log message is throttled.
 	fallbackLogged sync.Map
 	counters       struct {
-		fallback         atomic.Int64
-		claimsUnmarshal  atomic.Int64
+		fallback        atomic.Int64
+		claimsUnmarshal atomic.Int64
 	}
 }
 

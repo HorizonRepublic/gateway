@@ -129,7 +129,13 @@ func NewServer(
 		return nil, fmt.Errorf("http server: %w", err)
 	}
 
-	h := server.Default(
+	// server.New instead of server.Default: Default's only addition is
+	// the stock recovery middleware (hlog plain-text logging, empty 500
+	// body), which the gateway replaces with its own zerolog-integrated
+	// recovery below. Registering the custom recovery on top of Default
+	// would leave dead middleware in the chain — the inner handler
+	// would win every panic and the stock one would never fire.
+	h := server.New(
 		server.WithHostPorts(cfg.HTTPAddr),
 		server.WithMaxRequestBodySize(maxBody),
 		server.WithMaxHeaderBytes(cfg.MaxHeaderBytes),
@@ -157,6 +163,12 @@ func NewServer(
 	// upstream of Use() so health checks bypass the cap — a
 	// saturated gateway must still report ready/live so K8s does not
 	// restart it during the very incident the cap is defending against.
+	// Recovery registers before everything else so its deferred
+	// recover() encloses the limiter, the trusted-proxy middleware,
+	// and the adapter — a panic anywhere in the chain produces one
+	// structured log event and the shared 500 JSON body instead of a
+	// torn connection.
+	h.Use(newRecoveryMiddleware(logger))
 	limiter := newConcurrencyLimitMiddleware(cfg.HTTPMaxConcurrentRequests)
 	h.Use(limiter.handler)
 	h.Use(newTrustedProxyMiddleware(cfg.TrustedProxies, cfg.TrustedProxyHeader))

@@ -146,7 +146,7 @@ func TestHandler_HappyPath(t *testing.T) {
 	reply := []byte(`{"status":200,"headers":{},"body":{"ok":true}}`)
 	h := buildHandler(table, reply, nil)
 
-	result := h.Handle(context.Background(),emptyServeInput("GET", "/users"))
+	result := h.Handle(context.Background(), emptyServeInput("GET", "/users"))
 
 	assert.Equal(t, 200, result.Status)
 	assert.Equal(t, []string{"r1"}, result.Headers["x-request-id"])
@@ -158,7 +158,7 @@ func TestHandler_Returns404WhenRouteNotFound(t *testing.T) {
 	table := &fakeTable{routes: map[string]routing.Route{}}
 	h := buildHandler(table, nil, nil)
 
-	result := h.Handle(context.Background(),emptyServeInput("GET", "/unknown"))
+	result := h.Handle(context.Background(), emptyServeInput("GET", "/unknown"))
 
 	assert.Equal(t, 404, result.Status)
 	assert.Equal(t, gerrors.NotFound.Body, result.Body)
@@ -179,7 +179,7 @@ func TestHandler_Returns405WithAllowHeaderWhenMethodMismatch(t *testing.T) {
 	}
 	h := buildHandler(table, nil, nil)
 
-	result := h.Handle(context.Background(),emptyServeInput("DELETE", "/users"))
+	result := h.Handle(context.Background(), emptyServeInput("DELETE", "/users"))
 
 	assert.Equal(t, 405, result.Status)
 	assert.Equal(t, gerrors.MethodNotAllowed.Body, result.Body)
@@ -197,7 +197,7 @@ func TestHandler_Returns404WhenPathUnknownEvenOnMethodMismatch(t *testing.T) {
 	}
 	h := buildHandler(table, nil, nil)
 
-	result := h.Handle(context.Background(),emptyServeInput("DELETE", "/does-not-exist"))
+	result := h.Handle(context.Background(), emptyServeInput("DELETE", "/does-not-exist"))
 
 	assert.Equal(t, 404, result.Status)
 	assert.Equal(t, gerrors.NotFound.Body, result.Body)
@@ -209,7 +209,7 @@ func TestHandler_Returns504OnTimeout(t *testing.T) {
 	}}
 	h := buildHandler(table, nil, natsgo.ErrTimeout)
 
-	result := h.Handle(context.Background(),emptyServeInput("GET", "/users"))
+	result := h.Handle(context.Background(), emptyServeInput("GET", "/users"))
 
 	assert.Equal(t, 504, result.Status)
 	assert.Equal(t, gerrors.GatewayTimeout.Body, result.Body)
@@ -221,7 +221,7 @@ func TestHandler_Returns503OnNatsError(t *testing.T) {
 	}}
 	h := buildHandler(table, nil, errors.New("connection refused"))
 
-	result := h.Handle(context.Background(),emptyServeInput("GET", "/users"))
+	result := h.Handle(context.Background(), emptyServeInput("GET", "/users"))
 
 	assert.Equal(t, 503, result.Status)
 	assert.Equal(t, gerrors.ServiceUnavailable.Body, result.Body)
@@ -267,7 +267,7 @@ func TestHandler_Returns502OnMalformedReply(t *testing.T) {
 	}}
 	h := buildHandler(table, []byte(`not json`), nil)
 
-	result := h.Handle(context.Background(),emptyServeInput("GET", "/users"))
+	result := h.Handle(context.Background(), emptyServeInput("GET", "/users"))
 
 	assert.Equal(t, 502, result.Status)
 	assert.Equal(t, gerrors.BadGateway.Body, result.Body)
@@ -283,7 +283,7 @@ func TestHandler_SuccessReplyPreservesStatusAndHeaders(t *testing.T) {
 	in := emptyServeInput("POST", "/users")
 	in.Body = []byte(`{"name":"Alice"}`)
 
-	result := h.Handle(context.Background(),in)
+	result := h.Handle(context.Background(), in)
 
 	assert.Equal(t, 201, result.Status)
 	assert.Equal(t, []string{"yes"}, result.Headers["x-custom"])
@@ -359,7 +359,7 @@ func TestHandler_CallsVerifierBeforeRoute(t *testing.T) {
 	in := authServeInput("GET", "/users/me")
 	in.Headers = map[string]string{"authorization": "Bearer xyz"}
 
-	result := sut.Handle(context.Background(),in)
+	result := sut.Handle(context.Background(), in)
 
 	require.Equal(t, 200, result.Status)
 	assert.Contains(t, string(result.Body), "greeting")
@@ -395,7 +395,7 @@ func TestHandler_ShortCircuitsOn401FromVerifier(t *testing.T) {
 
 	sut := newAuthHandler(stubTable(route), nats)
 
-	result := sut.Handle(context.Background(),authServeInput("GET", "/users/me"))
+	result := sut.Handle(context.Background(), authServeInput("GET", "/users/me"))
 
 	assert.Equal(t, 401, result.Status)
 	assert.Equal(t, []string{"Bearer"}, result.Headers["www-authenticate"])
@@ -429,7 +429,7 @@ func TestHandler_StampsDefaultWWWAuthenticateOn401WhenVerifierOmitsIt(t *testing
 
 	sut := newAuthHandler(stubTable(route), nats)
 
-	result := sut.Handle(context.Background(),authServeInput("GET", "/users/me"))
+	result := sut.Handle(context.Background(), authServeInput("GET", "/users/me"))
 
 	assert.Equal(t, 401, result.Status)
 	assert.Equal(t, []string{`Bearer realm="gateway"`}, result.Headers["www-authenticate"])
@@ -458,7 +458,7 @@ func TestHandler_PreservesVerifierWWWAuthenticateOn401(t *testing.T) {
 
 	sut := newAuthHandler(stubTable(route), nats)
 
-	result := sut.Handle(context.Background(),authServeInput("GET", "/users/me"))
+	result := sut.Handle(context.Background(), authServeInput("GET", "/users/me"))
 
 	assert.Equal(t, 401, result.Status)
 	assert.Equal(t,
@@ -494,7 +494,7 @@ func TestHandler_OptionalAuthContinuesOn401(t *testing.T) {
 
 	// The fakeTable does not actually parse `:id` — its Lookup keys on
 	// literal method+template, so feed the template path through.
-	result := sut.Handle(context.Background(),authServeInput("GET", "/articles/:id"))
+	result := sut.Handle(context.Background(), authServeInput("GET", "/articles/:id"))
 
 	assert.Equal(t, 200, result.Status)
 	require.Len(t, nats.requests, 2)
@@ -526,7 +526,7 @@ func TestHandler_OptionalAuthStillForwards403(t *testing.T) {
 
 	sut := newAuthHandler(stubTable(route), nats)
 
-	result := sut.Handle(context.Background(),authServeInput("GET", "/articles/:id"))
+	result := sut.Handle(context.Background(), authServeInput("GET", "/articles/:id"))
 
 	assert.Equal(t, 403, result.Status)
 	require.Len(t, nats.requests, 1, "route was not called")
@@ -548,7 +548,7 @@ func TestHandler_VerifierNoRespondersReturns503(t *testing.T) {
 
 	sut := newAuthHandler(stubTable(route), nats)
 
-	result := sut.Handle(context.Background(),authServeInput("GET", "/users/me"))
+	result := sut.Handle(context.Background(), authServeInput("GET", "/users/me"))
 
 	assert.Equal(t, 503, result.Status)
 }
@@ -578,7 +578,7 @@ func TestHandler_MergesVerifierAndRouteCookies(t *testing.T) {
 
 	sut := newAuthHandler(stubTable(route), nats)
 
-	result := sut.Handle(context.Background(),authServeInput("GET", "/users/me"))
+	result := sut.Handle(context.Background(), authServeInput("GET", "/users/me"))
 
 	require.Equal(t, 200, result.Status)
 	// Spec §6.6: verifier values FIRST, route values AFTER.
@@ -614,7 +614,7 @@ func TestHandler_VerifierOnlyCookiePassesThrough(t *testing.T) {
 
 	sut := newAuthHandler(stubTable(route), nats)
 
-	result := sut.Handle(context.Background(),authServeInput("GET", "/users/me"))
+	result := sut.Handle(context.Background(), authServeInput("GET", "/users/me"))
 
 	require.Equal(t, 200, result.Status)
 	assert.Equal(t, []string{"rotated=new; HttpOnly"}, result.Headers["set-cookie"])
@@ -645,7 +645,7 @@ func TestHandler_RouteOnlyCookieUnchanged(t *testing.T) {
 
 	sut := newAuthHandler(stubTable(route), nats)
 
-	result := sut.Handle(context.Background(),authServeInput("GET", "/users/me"))
+	result := sut.Handle(context.Background(), authServeInput("GET", "/users/me"))
 
 	require.Equal(t, 200, result.Status)
 	assert.Equal(t, []string{"theme=dark; Path=/"}, result.Headers["set-cookie"])
@@ -676,7 +676,7 @@ func TestHandler_RouteHeaderWinsOverVerifierForSingleValue(t *testing.T) {
 
 	sut := newAuthHandler(stubTable(route), nats)
 
-	result := sut.Handle(context.Background(),authServeInput("GET", "/users/me"))
+	result := sut.Handle(context.Background(), authServeInput("GET", "/users/me"))
 
 	require.Equal(t, 200, result.Status)
 	// Single-value conflict → route reply owns the slot.
@@ -708,7 +708,7 @@ func TestHandler_VerifierOnlyHeaderPassesThrough(t *testing.T) {
 
 	sut := newAuthHandler(stubTable(route), nats)
 
-	result := sut.Handle(context.Background(),authServeInput("GET", "/users/me"))
+	result := sut.Handle(context.Background(), authServeInput("GET", "/users/me"))
 
 	require.Equal(t, 200, result.Status)
 	assert.Equal(t, []string{"vtrace-abc"}, result.Headers["x-verifier-trace"])
@@ -892,7 +892,7 @@ func TestHandler_OptionalAuth401DoesNotMergeVerifierHeaders(t *testing.T) {
 
 	sut := newAuthHandler(stubTable(route), nats)
 
-	result := sut.Handle(context.Background(),authServeInput("GET", "/articles/:id"))
+	result := sut.Handle(context.Background(), authServeInput("GET", "/articles/:id"))
 
 	require.Equal(t, 200, result.Status)
 	_, traceSeen := result.Headers["x-verifier-trace"]
@@ -929,7 +929,7 @@ func TestHandler_GatewayRequestIDBeatsVerifierSpoofing(t *testing.T) {
 	in := authServeInput("GET", "/users/me")
 	in.RequestID = "req-0001"
 
-	result := sut.Handle(context.Background(),in)
+	result := sut.Handle(context.Background(), in)
 
 	require.Equal(t, 200, result.Status)
 	assert.Equal(t, []string{"req-0001"}, result.Headers["x-request-id"])
@@ -945,7 +945,7 @@ func TestHandler_OverwritesUpstreamRequestID(t *testing.T) {
 	reply := []byte(`{"status":200,"headers":{"x-request-id":["spoofed"]},"body":null}`)
 	h := buildHandler(table, reply, nil)
 
-	result := h.Handle(context.Background(),emptyServeInput("GET", "/users"))
+	result := h.Handle(context.Background(), emptyServeInput("GET", "/users"))
 
 	assert.Equal(t, []string{"r1"}, result.Headers["x-request-id"])
 }
@@ -972,7 +972,7 @@ func TestHandler_PreflightReturns204WithCORSHeaders(t *testing.T) {
 	in.Headers["origin"] = "https://example.com"
 	in.Headers["access-control-request-method"] = "GET"
 
-	result := h.Handle(context.Background(),in)
+	result := h.Handle(context.Background(), in)
 
 	assert.Equal(t, 204, result.Status)
 	assert.Equal(t, []string{"https://example.com"}, result.Headers["Access-Control-Allow-Origin"])
@@ -996,7 +996,7 @@ func TestHandler_PreflightReturns404WhenNoCORSConfig(t *testing.T) {
 	in.Headers["origin"] = "https://example.com"
 	in.Headers["access-control-request-method"] = "GET"
 
-	result := h.Handle(context.Background(),in)
+	result := h.Handle(context.Background(), in)
 
 	assert.Equal(t, 404, result.Status)
 }
@@ -1014,7 +1014,7 @@ func TestHandler_PreflightReturns404WithoutACRM(t *testing.T) {
 	in := emptyServeInput("OPTIONS", "/users")
 	in.Headers["origin"] = "https://example.com"
 
-	result := h.Handle(context.Background(),in)
+	result := h.Handle(context.Background(), in)
 
 	assert.Equal(t, 404, result.Status)
 }
@@ -1033,7 +1033,7 @@ func TestHandler_PreflightReturns404OnOriginMismatch(t *testing.T) {
 	in.Headers["origin"] = "https://evil.com"
 	in.Headers["access-control-request-method"] = "GET"
 
-	result := h.Handle(context.Background(),in)
+	result := h.Handle(context.Background(), in)
 
 	assert.Equal(t, 404, result.Status)
 }
@@ -1098,7 +1098,7 @@ func TestHandler_RateLimitReturns429(t *testing.T) {
 	table := &fakeTable{routes: map[string]routing.Route{
 		"GET /users": {
 			Subject: "svc.cmd.users.list", PathTemplate: "/users",
-			Method: "GET",
+			Method:    "GET",
 			RateLimit: &registry.RateLimitMeta{RPS: 10, Burst: 20},
 		},
 	}}
@@ -1118,7 +1118,7 @@ func TestHandler_RateLimitReturns429(t *testing.T) {
 	in := emptyServeInput("GET", "/users")
 	in.RemoteAddr = "1.2.3.4"
 
-	result := h.Handle(context.Background(),in)
+	result := h.Handle(context.Background(), in)
 
 	assert.Equal(t, 429, result.Status)
 	assert.Equal(t, gerrors.TooManyRequests.Body, result.Body)
@@ -1139,7 +1139,7 @@ func TestHandler_RateLimitDefaultBurstIs2xRPS(t *testing.T) {
 	table := &fakeTable{routes: map[string]routing.Route{
 		"GET /users": {
 			Subject: "svc.cmd.users.list", PathTemplate: "/users",
-			Method: "GET",
+			Method:    "GET",
 			RateLimit: &registry.RateLimitMeta{RPS: 5},
 		},
 	}}
@@ -1154,7 +1154,7 @@ func TestHandler_RateLimitDefaultBurstIs2xRPS(t *testing.T) {
 		RateLimiter: routerWithStore(t, rl),
 	})
 
-	h.Handle(context.Background(),emptyServeInput("GET", "/users"))
+	h.Handle(context.Background(), emptyServeInput("GET", "/users"))
 
 	require.Len(t, rl.calls, 1)
 	assert.Equal(t, 10, rl.calls[0].burst, "default burst = 2 * RPS")
@@ -1240,14 +1240,14 @@ func TestHandler_RateLimitSkippedWhenNoStore(t *testing.T) {
 	table := &fakeTable{routes: map[string]routing.Route{
 		"GET /users": {
 			Subject: "svc.cmd.users.list", PathTemplate: "/users",
-			Method: "GET",
+			Method:    "GET",
 			RateLimit: &registry.RateLimitMeta{RPS: 10},
 		},
 	}}
 	reply := []byte(`{"status":200,"headers":{},"body":null}`)
 	h := buildHandler(table, reply, nil)
 
-	result := h.Handle(context.Background(),emptyServeInput("GET", "/users"))
+	result := h.Handle(context.Background(), emptyServeInput("GET", "/users"))
 
 	assert.Equal(t, 200, result.Status, "request proceeds when RateLimiter is nil")
 }
@@ -1277,7 +1277,7 @@ func TestHandler_PerRouteTimeoutOverridesGlobal(t *testing.T) {
 		Logger:  zerolog.Nop(),
 	})
 
-	result := h.Handle(context.Background(),emptyServeInput("GET", "/slow"))
+	result := h.Handle(context.Background(), emptyServeInput("GET", "/slow"))
 
 	assert.Equal(t, 200, result.Status)
 	require.Len(t, nats.requests, 1)
@@ -1312,7 +1312,7 @@ func TestHandler_ZeroRouteTimeoutUsesGlobal(t *testing.T) {
 		Logger:  zerolog.Nop(),
 	})
 
-	result := h.Handle(context.Background(),emptyServeInput("GET", "/fast"))
+	result := h.Handle(context.Background(), emptyServeInput("GET", "/fast"))
 
 	assert.Equal(t, 200, result.Status)
 	require.Len(t, nats.requests, 1)
@@ -1335,7 +1335,7 @@ func TestHandler_StaticRouteHeadersAppearOnResponse(t *testing.T) {
 	reply := []byte(`{"status":200,"headers":{},"body":null}`)
 	h := buildHandler(table, reply, nil)
 
-	result := h.Handle(context.Background(),emptyServeInput("GET", "/users"))
+	result := h.Handle(context.Background(), emptyServeInput("GET", "/users"))
 
 	assert.Equal(t, 200, result.Status)
 	assert.Equal(t, []string{"static-value"}, result.Headers["x-custom-header"])
@@ -1356,7 +1356,7 @@ func TestHandler_EnvelopeHeadersOverrideStaticHeaders(t *testing.T) {
 	reply := []byte(`{"status":200,"headers":{"cache-control":["no-store"]},"body":null}`)
 	h := buildHandler(table, reply, nil)
 
-	result := h.Handle(context.Background(),emptyServeInput("GET", "/users"))
+	result := h.Handle(context.Background(), emptyServeInput("GET", "/users"))
 
 	assert.Equal(t, 200, result.Status)
 	assert.Equal(t, []string{"no-store"}, result.Headers["cache-control"],
@@ -1384,7 +1384,7 @@ func TestHandler_CORSResponseHeadersOnNonOptions(t *testing.T) {
 	in := emptyServeInput("GET", "/users")
 	in.Headers["origin"] = "https://example.com"
 
-	result := h.Handle(context.Background(),in)
+	result := h.Handle(context.Background(), in)
 
 	assert.Equal(t, 200, result.Status)
 	assert.Equal(t, []string{"https://example.com"}, result.Headers["Access-Control-Allow-Origin"])
@@ -1414,7 +1414,7 @@ func TestHandler_CORSCustomExposeHeadersReachClient(t *testing.T) {
 	in := emptyServeInput("GET", "/users")
 	in.Headers["origin"] = "https://example.com"
 
-	result := h.Handle(context.Background(),in)
+	result := h.Handle(context.Background(), in)
 
 	assert.Equal(t, 200, result.Status)
 	assert.Equal(t,
@@ -1438,7 +1438,7 @@ func TestHandler_CORSResponseHeadersOmittedOnOriginMismatch(t *testing.T) {
 	in := emptyServeInput("GET", "/users")
 	in.Headers["origin"] = "https://evil.com"
 
-	result := h.Handle(context.Background(),in)
+	result := h.Handle(context.Background(), in)
 
 	assert.Equal(t, 200, result.Status)
 	_, hasCORS := result.Headers["Access-Control-Allow-Origin"]
@@ -1458,7 +1458,7 @@ func TestHandler_CORSResponseHeadersOmittedWhenNoCORSConfig(t *testing.T) {
 	in := emptyServeInput("GET", "/users")
 	in.Headers["origin"] = "https://example.com"
 
-	result := h.Handle(context.Background(),in)
+	result := h.Handle(context.Background(), in)
 
 	assert.Equal(t, 200, result.Status)
 	_, hasCORS := result.Headers["Access-Control-Allow-Origin"]
@@ -1585,7 +1585,7 @@ func TestHandler_RateLimitKeyByRequestAttribute(t *testing.T) {
 			in1.RemoteAddr = "1.1.1.1"
 			tc.setValue(in1, tc.value)
 
-			r1 := h.Handle(context.Background(),in1)
+			r1 := h.Handle(context.Background(), in1)
 
 			assert.Equal(t, 200, r1.Status)
 
@@ -1596,7 +1596,7 @@ func TestHandler_RateLimitKeyByRequestAttribute(t *testing.T) {
 			in2.RemoteAddr = "2.2.2.2"
 			tc.setValue(in2, tc.value)
 
-			r2 := h.Handle(context.Background(),in2)
+			r2 := h.Handle(context.Background(), in2)
 
 			assert.Equal(t, 429, r2.Status)
 
@@ -1655,7 +1655,7 @@ func TestHandler_RateLimitKeyByUserField(t *testing.T) {
 	in1.RemoteAddr = "10.0.0.1"
 	in1.Headers["authorization"] = "Bearer tok1"
 
-	r1 := h.Handle(context.Background(),in1)
+	r1 := h.Handle(context.Background(), in1)
 
 	assert.Equal(t, 200, r1.Status)
 
@@ -1664,7 +1664,7 @@ func TestHandler_RateLimitKeyByUserField(t *testing.T) {
 	in2.RemoteAddr = "10.0.0.2"
 	in2.Headers["authorization"] = "Bearer tok2"
 
-	r2 := h.Handle(context.Background(),in2)
+	r2 := h.Handle(context.Background(), in2)
 
 	assert.Equal(t, 429, r2.Status)
 	require.Len(t, rl.calls, 2)
@@ -1704,7 +1704,7 @@ func TestHandler_RateLimitKeyByFallsBackToIP(t *testing.T) {
 	in := emptyServeInput("GET", "/api")
 	in.RemoteAddr = "5.5.5.5"
 
-	result := h.Handle(context.Background(),in)
+	result := h.Handle(context.Background(), in)
 
 	assert.Equal(t, 200, result.Status)
 	require.Len(t, rl.calls, 1)
@@ -1732,7 +1732,7 @@ func TestHandler_CORSResponseOmittedWhenNoOriginHeader(t *testing.T) {
 	// Server-to-server call: no Origin header
 	in := emptyServeInput("GET", "/users")
 
-	result := h.Handle(context.Background(),in)
+	result := h.Handle(context.Background(), in)
 
 	assert.Equal(t, 200, result.Status)
 	assert.JSONEq(t, `{"ok":true}`, string(result.Body))
@@ -1759,7 +1759,7 @@ func TestHandler_PreflightOnRouteWithoutCORSConfig(t *testing.T) {
 	in.Headers["origin"] = "https://example.com"
 	in.Headers["access-control-request-method"] = "GET"
 
-	result := h.Handle(context.Background(),in)
+	result := h.Handle(context.Background(), in)
 
 	assert.Equal(t, 404, result.Status,
 		"preflight on a route without CORS config returns 404")
@@ -1990,7 +1990,7 @@ func TestHandler_RateLimitFailOpenEmitsOnlyLimitHeader(t *testing.T) {
 	table := &fakeTable{routes: map[string]routing.Route{
 		"GET /users": {
 			Subject: "svc.cmd.users.list", PathTemplate: "/users",
-			Method: "GET",
+			Method:    "GET",
 			RateLimit: &registry.RateLimitMeta{RPS: 10, Burst: 20},
 		},
 	}}
@@ -2039,7 +2039,7 @@ func TestHandler_RateLimitFailClosedReturns503OnStoreError(t *testing.T) {
 	table := &fakeTable{routes: map[string]routing.Route{
 		"GET /users": {
 			Subject: "svc.cmd.users.list", PathTemplate: "/users",
-			Method: "GET",
+			Method:    "GET",
 			RateLimit: &registry.RateLimitMeta{RPS: 10, Burst: 20},
 		},
 	}}
