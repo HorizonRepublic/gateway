@@ -59,6 +59,18 @@ var ErrCircuitOpen = errors.New("ratelimit: circuit open")
 // apart from a KV that always conflicts.
 var ErrCASBudgetExhausted = errors.New("ratelimit: cas budget exhausted")
 
+// errKVBudgetElapsed marks a backend call that consumed the store's
+// OWN wall-clock budget while the caller's context was still healthy —
+// the signature of a hung or pathologically slow KV. The wrap
+// deliberately severs the errors.Is chain to context.DeadlineExceeded
+// (the underlying cause is rendered with %v, not %w) so the breaker's
+// IsSuccessful whitelist for caller-side cancellations cannot
+// misclassify a dead backend as a benign termination. Without the
+// distinction the breaker never opens on a hung JetStream — the exact
+// outage it exists to short-circuit — and every request stalls for the
+// full budget indefinitely.
+var errKVBudgetElapsed = errors.New("ratelimit: kv call exceeded store budget")
+
 // ErrCASMaxAttempts is returned when the CAS retry loop hits its
 // hard attempt cap. Defensive bound; reaching it implies a broken
 // KV (every attempt races), not ordinary contention. Bumps the
@@ -205,6 +217,13 @@ func newNATSKVStoreFromKV(kv kvAPI, opts ...natskvOption) *NATSKVStore {
 // waiting. The error is still returned to the Allow caller so its
 // FailPolicy applies; only the breaker's failure-streak accounting
 // excludes these benign terminations.
+//
+// The whitelist relies on allowInternal's error classification: a
+// context deadline produced by the STORE's own budget (hung backend)
+// reaches the breaker as errKVBudgetElapsed, which does not satisfy
+// errors.Is(err, context.DeadlineExceeded) and therefore counts as a
+// real failure. Only deadlines and cancellations originating from the
+// caller's context keep their sentinel identity and pass as success.
 func newBreaker(failures uint32, timeout time.Duration, logger zerolog.Logger, stateGauge, transitions *atomic.Int64) *gobreaker.CircuitBreaker {
 	settings := gobreaker.Settings{
 		Name:    "ratelimit-natskv",
@@ -344,7 +363,7 @@ func (s *NATSKVStore) allowInternal(ctx context.Context, key string, rps, burst 
 			// Fresh bucket; currentTAT stays zero, rev stays 0.
 		default:
 			cancel()
-			return Decision{}, fmt.Errorf("nats-kv get: %w", err)
+			return Decision{}, fmt.Errorf("nats-kv get: %w", s.classifyBackendErr(ctx, err))
 		}
 
 		decision, newTAT := Check(currentTAT, time.Now(), rps, burst)
@@ -367,10 +386,37 @@ func (s *NATSKVStore) allowInternal(ctx context.Context, key string, rps, burst 
 			s.counters.casRetries.Add(1)
 			continue
 		}
-		return Decision{}, fmt.Errorf("nats-kv write: %w", err)
+		return Decision{}, fmt.Errorf("nats-kv write: %w", s.classifyBackendErr(ctx, err))
 	}
 	s.counters.casAttemptsExceeded.Add(1)
 	return Decision{}, ErrCASMaxAttempts
+}
+
+// classifyBackendErr disambiguates a context-shaped backend error by
+// asking WHICH context produced it. Every KV call runs under a derived
+// context capped by the store's CAS budget; when the backend hangs,
+// that derived deadline fires and the error surfaces as
+// context.DeadlineExceeded — byte-identical to a caller-side timeout.
+// The two demand opposite breaker accounting:
+//
+//   - caller ctx done (ctx.Err() != nil): the client stopped waiting
+//     or an upstream timeout chain fired. Not the KV's fault — keep
+//     the context sentinel in the chain so IsSuccessful whitelists it.
+//   - caller ctx healthy: the store's own budget elapsed against an
+//     unresponsive backend. Rewrap as errKVBudgetElapsed, severing the
+//     context sentinel from the chain (%v, not %w) so the breaker
+//     counts a real failure and can eventually short-circuit.
+//
+// Non-context errors (connection refused, server fault) pass through
+// untouched — they already count as failures.
+func (s *NATSKVStore) classifyBackendErr(ctx context.Context, err error) error {
+	if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+		return err
+	}
+	if ctx.Err() != nil {
+		return err
+	}
+	return fmt.Errorf("%w: %v", errKVBudgetElapsed, err)
 }
 
 // computeDeadline returns the effective wall-clock cap for a single

@@ -428,6 +428,36 @@ func TestNATSKVStore_BudgetCapsBackendCallsWhenCtxHasNoDeadline(t *testing.T) {
 		"Allow must enforce its own wall-clock bound when ctx has no deadline")
 }
 
+// TestNATSKVStore_HungKVTripsBreaker pins the other half of the
+// failure-classification contract: when the STORE's own CAS budget
+// expires because the backend hangs (the canonical dead-JetStream
+// outage the breaker exists for), the resulting error MUST count as a
+// breaker failure even though it surfaces as a context deadline. The
+// caller's context is healthy here — only the store-derived per-call
+// deadline fired — so the "benign caller cancellation" whitelist must
+// not swallow it. Without the distinction the breaker never opens on a
+// hung KV and every request eats the full budget stall forever.
+func TestNATSKVStore_HungKVTripsBreaker(t *testing.T) {
+	const failures = 3
+	sut := newNATSKVStoreFromKV(blockingKV{},
+		withCASBudget(5*time.Millisecond),
+		withBreakerFailures(failures),
+	)
+
+	for i := 0; i < failures; i++ {
+		_, err := sut.Allow(context.Background(), "k", 100, 5)
+		require.Error(t, err, "iteration %d: hung KV must surface an error", i)
+		require.NotErrorIs(t, err, ErrCircuitOpen,
+			"iteration %d: breaker must still be closed while failures accumulate", i)
+	}
+
+	_, err := sut.Allow(context.Background(), "k", 100, 5)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrCircuitOpen,
+		"store-budget expiry on a hung KV must accumulate as breaker failures and open the circuit")
+	assert.Equal(t, int64(1), sut.counters.circuitRejected.Load())
+}
+
 // TestNATSKVStore_CancelledCtxDoesNotTripBreaker pins the
 // fail-classification fix: a cancelled or deadline-exceeded request
 // context MUST NOT count as a backend failure for the circuit breaker.

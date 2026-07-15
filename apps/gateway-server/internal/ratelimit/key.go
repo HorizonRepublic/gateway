@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/cespare/xxhash/v2"
@@ -85,18 +86,63 @@ func hashKey(input string) string {
 	return encodeBase32(xxhash.Sum64String(input))
 }
 
+// hashEncodedLength is the fixed output width of encodeBase32:
+// ceil(64/5) = 13 characters for a uint64.
+const hashEncodedLength = 13
+
 // encodeBase32 renders a uint64 as exactly 13 lowercase-base32
-// characters without padding (ceil(64/5) = 13). Fills the buffer
-// right-to-left because each iteration captures the low 5 bits of h
-// before shifting.
+// characters without padding.
 func encodeBase32(h uint64) string {
-	var buf [13]byte
-	for i := 12; i >= 0; i-- {
+	var buf [hashEncodedLength]byte
+	encodeBase32Into(&buf, h)
+
+	return string(buf[:])
+}
+
+// encodeBase32Into fills buf with the 13-character lowercase-base32
+// rendering of h. Fills right-to-left because each iteration captures
+// the low 5 bits of h before shifting. The caller-provided buffer
+// variant lets hot-path composition append the digest without an
+// intermediate string allocation.
+func encodeBase32Into(buf *[hashEncodedLength]byte, h uint64) {
+	for i := hashEncodedLength - 1; i >= 0; i-- {
 		buf[i] = base32Alphabet[h&0x1f]
 		h >>= 5
 	}
+}
 
-	return string(buf[:])
+// pathHashCacheMaxEntries bounds the pathTemplateHash cache. Route
+// path templates come from the sanitized registry, so cardinality is
+// the live route count (typically hundreds); the bound exists so that
+// a misbehaving registry churning unique templates degrades to
+// hash-per-call instead of unbounded memory growth.
+const pathHashCacheMaxEntries = 4096
+
+// pathHashCache memoizes hashKey(pathTemplate) keyed by the template
+// string. The (method, pathTemplate) half of every bucket key is
+// immutable once a routing table is built, yet BuildBucketKey runs on
+// every rate-limited request — without the cache the same template is
+// re-hashed and re-encoded ~100k times per second at target load.
+var (
+	pathHashCache     sync.Map // map[string]string
+	pathHashCacheSize atomic.Int64
+)
+
+// pathTemplateHash returns hashKey(pathTemplate), memoized. Lookups
+// key directly on the template string so a cache hit costs one
+// sync.Map Load and zero allocations.
+func pathTemplateHash(pathTemplate string) string {
+	if v, ok := pathHashCache.Load(pathTemplate); ok {
+		return v.(string)
+	}
+	h := hashKey(pathTemplate)
+	if pathHashCacheSize.Load() < pathHashCacheMaxEntries {
+		if _, loaded := pathHashCache.LoadOrStore(pathTemplate, h); !loaded {
+			pathHashCacheSize.Add(1)
+		}
+	}
+
+	return h
 }
 
 // BuildBucketKey composes a NATS-KV-safe rate-limit bucket key using
@@ -116,8 +162,25 @@ func encodeBase32(h uint64) string {
 // are already NATS-KV-safe. Both pathTemplate and resolvedKey are
 // hashed so arbitrary user-supplied characters (':', '/', ' ', '>',
 // '*', etc.) never reach the key.
+//
+// Hot-path shape: the pathTemplate digest is memoized (immutable per
+// route) and the resolvedKey digest is encoded straight into the
+// output buffer, so a call with a warm template costs one xxhash over
+// the resolved key and a single string allocation.
 func BuildBucketKey(method, pathTemplate, resolvedKey string) string {
-	return method + "." + hashKey(pathTemplate) + "." + hashKey(resolvedKey)
+	templateHash := pathTemplateHash(pathTemplate)
+
+	var resolvedHash [hashEncodedLength]byte
+	encodeBase32Into(&resolvedHash, xxhash.Sum64String(resolvedKey))
+
+	out := make([]byte, 0, len(method)+1+hashEncodedLength+1+hashEncodedLength)
+	out = append(out, method...)
+	out = append(out, '.')
+	out = append(out, templateHash...)
+	out = append(out, '.')
+	out = append(out, resolvedHash[:]...)
+
+	return string(out)
 }
 
 // ResolveKey walks the keyBy chain and returns the first resolved value.

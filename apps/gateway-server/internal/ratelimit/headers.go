@@ -17,7 +17,18 @@ import (
 //
 // Emits when the Decision was populated by a successful Store.Allow
 // call (d.ResetAt is non-zero):
-//   - X-RateLimit-Remaining = decision.Remaining
+//   - X-RateLimit-Remaining = decision.Remaining clamped to
+//     [0, rl.RPS]. Decision.Remaining counts burst slots, whose
+//     ceiling (the effective burst, 2×RPS by default) exceeds the
+//     advertised Limit; emitting it raw would break the countdown
+//     invariant remaining <= limit that GitHub/Stripe-style clients
+//     assume when computing used = limit - remaining. The clamp
+//     under-reports spare burst capacity — the conservative
+//     direction: a client honoring the header backs off early and is
+//     never surprised by a 429, and low readings (the ones adaptive
+//     throttlers act on) pass through exact. Remaining: 0 means the
+//     next instantaneous request rejects; the GCRA admission check
+//     and this counter share one contract.
 //   - X-RateLimit-Reset     = decision.ResetAt as Unix seconds
 //
 // Omits Remaining and Reset on a zero Decision (d.ResetAt.IsZero()).
@@ -44,11 +55,14 @@ import (
 // returned map is fresh and safe to mutate / merge into any
 // http.Header-compatible collection.
 func BuildHeaders(rl *registry.RateLimitMeta, d Decision) map[string]string {
-	h := map[string]string{
-		"X-RateLimit-Limit": strconv.Itoa(rl.RPS),
-	}
+	h := make(map[string]string, 4)
+	h["X-RateLimit-Limit"] = strconv.Itoa(rl.RPS)
 	if !d.ResetAt.IsZero() {
-		h["X-RateLimit-Remaining"] = strconv.Itoa(d.Remaining)
+		remaining := d.Remaining
+		if remaining > rl.RPS {
+			remaining = rl.RPS
+		}
+		h["X-RateLimit-Remaining"] = strconv.Itoa(remaining)
 		h["X-RateLimit-Reset"] = strconv.FormatInt(d.ResetAt.Unix(), 10)
 	}
 	if !d.Allowed && !d.ResetAt.IsZero() {
