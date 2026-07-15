@@ -15,7 +15,6 @@
 package http
 
 import (
-	"bytes"
 	"context"
 	"time"
 
@@ -117,7 +116,7 @@ func buildServeInput(ctx *app.RequestContext) *proxy.ServeInput {
 	// together with comma-comma confusion.
 	headers := make(map[string]string, initialHeadersCap)
 	ctx.Request.Header.VisitAll(func(key, value []byte) {
-		lowerKey := string(bytes.ToLower(key))
+		lowerKey := lowerHeaderKey(key)
 		if _, skip := hopByHopHeaders[lowerKey]; skip {
 			return
 		}
@@ -167,14 +166,31 @@ func buildServeInput(ctx *app.RequestContext) *proxy.ServeInput {
 // slice Multi variant, preserving "repeated" semantics so the
 // upstream handler's Array.isArray() discriminator still works.
 //
+// A request without a query string returns a nil map so the GET-heavy
+// common case allocates nothing here — the two intermediate maps the
+// previous unconditional collection built are skipped entirely.
+// Downstream consumers already treat nil and empty identically: the
+// envelope encoder ranges over the map (a no-op for nil) into its
+// pooled non-nil Query map, so the wire shape stays `"query":{}`
+// either way. The nil path is pinned by
+// TestBuildServeInput_NoQueryStringYieldsNilQuery and the wire shape
+// by TestAppendEnvelopeJSON_NilQueryEncodesAsEmptyObject.
+//
 // Two-pass collection — accumulate into an intermediate
 // map[string][]string, then convert — is deliberate: Hertz's
 // VisitAll callback fires once per (key, value) pair, and attempting
 // to make the union decision in the callback requires mutating the
 // target map mid-iteration, which is error-prone and harder to read.
+// The early Len() gate keeps that two-map cost off the query-less
+// path without adding a branch to the populated path's inner loop.
 func collectQueryValues(ctx *app.RequestContext) map[string]proxy.QueryValue {
+	args := ctx.QueryArgs()
+	if args.Len() == 0 {
+		return nil
+	}
+
 	accumulator := make(map[string][]string, initialQueryCap)
-	ctx.QueryArgs().VisitAll(func(key, value []byte) {
+	args.VisitAll(func(key, value []byte) {
 		k := string(key)
 		accumulator[k] = append(accumulator[k], string(value))
 	})
@@ -243,6 +259,55 @@ func writeServeResult(ctx *app.RequestContext, result *proxy.ServeResult, reques
 
 	ctx.SetStatusCode(result.Status)
 	ctx.Response.SetBody(result.Body)
+}
+
+// maxStackHeaderKey caps the stack buffer lowerHeaderKey lowercases
+// into. Header field names are short by construction — the longest
+// standard name is well under 64 bytes and typical custom names ("x-…")
+// shorter still — so realistic keys never spill to the heap branch.
+const maxStackHeaderKey = 64
+
+// lowerHeaderKey converts a raw header key to its lowercase string
+// form in exactly one allocation. The generic
+// string(bytes.ToLower(key)) idiom costs two — bytes.ToLower copies
+// into a fresh heap []byte and the string conversion copies that
+// again — which on a request with a dozen headers is a dozen
+// avoidable allocations per request. Here the lowercasing happens in
+// a stack buffer, so only the final string conversion allocates.
+//
+// Lowering is ASCII-only: RFC 9110 §5.1 restricts field names to the
+// token charset, a subset of ASCII, so bytes >= 0x80 cannot appear in
+// a valid header name and are passed through untouched. The strings
+// they would form are invalid header names either way and match none
+// of the lowercase keys downstream code looks up.
+func lowerHeaderKey(key []byte) string {
+	if len(key) <= maxStackHeaderKey {
+		var buf [maxStackHeaderKey]byte
+		n := copy(buf[:], key)
+		lowerASCII(buf[:n])
+
+		return string(buf[:n])
+	}
+
+	// Pathologically long header name: lowercase into a heap slice.
+	// Two allocations here (slice + string) are acceptable because
+	// this branch is unreachable for any conformant client.
+	lower := make([]byte, len(key))
+	copy(lower, key)
+	lowerASCII(lower)
+
+	return string(lower)
+}
+
+// lowerASCII lowercases the ASCII uppercase letters of b in place,
+// leaving every other byte untouched. Kept branch-light so the
+// compiler can keep it inlined on the header hot path.
+func lowerASCII(b []byte) {
+	for i := 0; i < len(b); i++ {
+		if c := b[i]; 'A' <= c && c <= 'Z' {
+			b[i] = c + ('a' - 'A')
+		}
+	}
 }
 
 // headerJoinSeparator returns the delimiter used when merging

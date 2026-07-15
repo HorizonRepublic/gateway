@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/rs/zerolog"
 
@@ -252,23 +254,21 @@ func (h *Handler) Handle(ctx context.Context, in *ServeInput) *ServeResult {
 func (h *Handler) serve(ctx context.Context, in *ServeInput, obs *requestOutcome) *ServeResult {
 	table := h.cfg.Table()
 
-	if in.Method == "OPTIONS" {
+	// A CORS preflight is an OPTIONS request carrying an
+	// Access-Control-Request-Method header — that pair is the WHATWG
+	// Fetch definition of a preflight. Plain OPTIONS (no ACRM) falls
+	// through to normal route lookup so SDK-declared OPTIONS routes
+	// (a first-class verb on both sides of the wire contract) stay
+	// reachable, and plain OPTIONS to a non-OPTIONS route follows the
+	// standard 404/405 semantics.
+	if in.Method == "OPTIONS" && in.Headers["access-control-request-method"] != "" {
 		obs.route = observability.RoutePreflight
 		return h.handlePreflight(table, in)
 	}
 
-	// Bind a request-scoped logger before route lookup so even the
-	// 404/405 short-circuits carry the request_id + traceparent
-	// fields that operators rely on for cross-service correlation
-	// during postmortems. The route field is appended after lookup.
-	reqLog := h.cfg.Logger.With().
-		Str("request_id", in.RequestID).
-		Str("traceparent", in.Traceparent).
-		Logger()
-
 	route, params, ok := table.Lookup(in.Method, in.Path)
 	if !ok {
-		if allow := table.Methods(in.Path); len(allow) > 0 {
+		if allow := allowedMethods(table, in.Method, in.Path); len(allow) > 0 {
 			result := toServeResult(gerrors.MethodNotAllowed)
 			result.Headers["Allow"] = []string{strings.Join(allow, ", ")}
 
@@ -278,9 +278,7 @@ func (h *Handler) serve(ctx context.Context, in *ServeInput, obs *requestOutcome
 		return toServeResult(gerrors.NotFound)
 	}
 
-	reqLog = reqLog.With().
-		Str("route", route.Method+":"+route.PathTemplate).
-		Logger()
+	origin := in.Headers["origin"]
 
 	obs.route = route.PathTemplate
 	obs.subject = route.Subject
@@ -289,57 +287,93 @@ func (h *Handler) serve(ctx context.Context, in *ServeInput, obs *requestOutcome
 	// (RFC 8259 §2), so a non-JSON inbound body can never be
 	// embedded verbatim — upstream JSON.parse would throw and the
 	// client would see an opaque 5xx indistinguishable from an
-	// outage. Reject with 400 before spending a verifier hop or a
+	// outage. The utf8.Valid leg closes the gap syntactic validation
+	// leaves open: RFC 8259 §8.1 makes UTF-8 a MUST for inter-system
+	// exchange, and a syntactically valid body carrying invalid UTF-8
+	// bytes inside string values would otherwise be forwarded
+	// verbatim and silently mangled to U+FFFD by the SDK side's
+	// non-fatal TextDecoder — every other envelope string is
+	// sanitised, and on a write path silent corruption is worse than
+	// a 400 at the edge. Reject before spending a verifier hop or a
 	// rate-limit store round-trip on a request that cannot be
 	// forwarded. Empty bodies skip the check (encoded as `null`).
-	if len(in.Body) > 0 && !codec.Valid(in.Body) {
+	if len(in.Body) > 0 && (!utf8.Valid(in.Body) || !codec.Valid(in.Body)) {
+		reqLog := h.requestLogger(in, &route)
 		reqLog.Debug().Msg("proxy: rejecting non-JSON request body")
-		return toServeResult(gerrors.BadRequest)
+		return stampCORSOnResult(toServeResult(gerrors.BadRequest), route.CORS, origin)
 	}
 
-	var claims json.RawMessage
-	var authHeaders map[string][]string
-
+	// One deadline governs the whole downstream pipeline: rate-limit
+	// gate, verifier leg, and main route leg all draw from the same
+	// per-route budget anchored here. Each leg receives only the
+	// remaining slice, so the client-observable latency is bounded by
+	// the declared route timeout instead of the sum of the legs'
+	// independent timeouts.
 	timeout := h.cfg.Timeout
 	if route.Timeout > 0 {
 		timeout = route.Timeout
 	}
+	deadline := time.Now().Add(timeout)
 
-	routeHeaders := in.Headers
-	if route.Auth != nil {
-		authOutcome := h.runAuthFlow(ctx, in, route, params, timeout, reqLog)
-		if !authOutcome.Proceed {
-			// 4xx short-circuits are verifier denials; 5xx means the
-			// verifier round trip itself failed (transport, decode).
-			obs.auth = outcomeDenied
-			if authOutcome.ShortCircuit.Status >= 500 {
-				obs.auth = outcomeError
-			}
+	var claims json.RawMessage
+	var authHeaders map[string][]string
+	var rlHeaders map[string]string
 
-			return authOutcome.ShortCircuit
+	// Rate-limit gate ordering splits on whether the keyBy chain
+	// needs verified claims:
+	//
+	//   - Chains keyed purely on wire attributes (ip, header, cookie —
+	//     including the empty-chain ip default) run BEFORE the auth
+	//     flow. Auth failures would otherwise bypass the limiter
+	//     entirely: an unauthenticated flood hammers the verifier at
+	//     line rate while the route's declared defense never fires and
+	//     never even appears in rate-limit metrics.
+	//   - Chains containing a user:* strategy run AFTER the auth flow
+	//     because they key on verified claims. Their exposure window
+	//     is the verifier hop only, and collapsing them onto a
+	//     pre-auth IP key would defeat per-user isolation for NAT'd
+	//     tenants.
+	//
+	// A request that clears a pre-auth gate and then fails auth has
+	// consumed a token by design — the failed attempt cost a verifier
+	// round trip, and charging it is what makes the limit meaningful
+	// against credential-stuffing traffic.
+	claimsKeyed := rateLimitNeedsClaims(route)
+	if !claimsKeyed {
+		var rlShortCircuit *ServeResult
+		rlHeaders, rlShortCircuit = h.applyRateLimitGate(ctx, route, in, nil, time.Until(deadline), obs)
+		if rlShortCircuit != nil {
+			return stampCORSOnResult(rlShortCircuit, route.CORS, origin)
 		}
-
-		obs.auth = outcomeOK
-		if authOutcome.Claims == nil {
-			obs.auth = outcomeAnonymous
-		}
-
-		claims = authOutcome.Claims
-		authHeaders = authOutcome.AuthHeaders
-		// Once the verifier has decoded the bearer token into
-		// structured claims, the raw credentials MUST NOT travel onto
-		// the route envelope. The claims are the contract the route
-		// handler consumes; forwarding the token alongside them lets
-		// any downstream service bypass the verifier (re-decode,
-		// store, replay) and silently breaks rotation, blacklists,
-		// and revocation. Cookie-auth is left untouched because
-		// cookie-auth is not yet wired through the verifier path.
-		routeHeaders = stripAuthHeaders(in.Headers)
 	}
 
-	rlHeaders, rlShortCircuit := h.applyRateLimitGate(ctx, route, in, claims, timeout, reqLog, obs)
-	if rlShortCircuit != nil {
-		return rlShortCircuit
+	authStage := h.applyAuthStage(ctx, in, route, params, deadline, rlHeaders, origin, obs)
+	if authStage.ShortCircuit != nil {
+		return authStage.ShortCircuit
+	}
+	claims = authStage.Claims
+	authHeaders = authStage.AuthHeaders
+	routeHeaders := authStage.RouteHeaders
+
+	if claimsKeyed {
+		var rlShortCircuit *ServeResult
+		rlHeaders, rlShortCircuit = h.applyRateLimitGate(ctx, route, in, claims, time.Until(deadline), obs)
+		if rlShortCircuit != nil {
+			return stampCORSOnResult(rlShortCircuit, route.CORS, origin)
+		}
+	}
+
+	// Remaining budget for the main leg, recomputed after the gate
+	// and the verifier consumed their slices. The envelope advertises
+	// this remainder — not the full route timeout — so the upstream
+	// handler budgets its internal work against reality. A verifier
+	// that ate the whole budget leaves nothing to run the route in;
+	// short-circuit 504 instead of issuing a request that is already
+	// dead on arrival.
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		result := mergeRateLimitHeaders(toServeResult(gerrors.GatewayTimeout), rlHeaders)
+		return stampCORSOnResult(result, route.CORS, origin)
 	}
 
 	payload := acquirePayload()
@@ -357,45 +391,59 @@ func (h *Handler) serve(ctx context.Context, in *ServeInput, obs *requestOutcome
 		Traceparent: in.Traceparent,
 		RemoteAddr:  in.RemoteAddr,
 		ReceivedAt:  in.ReceivedAt,
-		TimeoutMs:   timeout.Milliseconds(),
+		TimeoutMs:   remaining.Milliseconds(),
 		Auth:        claims,
 	})
 	if err != nil {
+		reqLog := h.requestLogger(in, &route)
 		reqLog.Error().Err(err).Msg("proxy encode failed")
-		return mergeRateLimitHeaders(toServeResult(gerrors.InternalError), rlHeaders)
+		result := mergeRateLimitHeaders(toServeResult(gerrors.InternalError), rlHeaders)
+		return stampCORSOnResult(result, route.CORS, origin)
 	}
 
-	replyBytes, err := h.cfg.Nats.Request(ctx, route.Subject, *payload, timeout)
+	replyBytes, err := h.cfg.Nats.Request(ctx, route.Subject, *payload, remaining)
 	if err != nil {
 		if isTimeoutErr(err) {
-			return mergeRateLimitHeaders(toServeResult(gerrors.GatewayTimeout), rlHeaders)
+			result := mergeRateLimitHeaders(toServeResult(gerrors.GatewayTimeout), rlHeaders)
+			return stampCORSOnResult(result, route.CORS, origin)
 		}
+		reqLog := h.requestLogger(in, &route)
 		reqLog.Error().Err(err).Str("subject", route.Subject).Msg("nats request failed")
-		return mergeRateLimitHeaders(toServeResult(gerrors.ServiceUnavailable), rlHeaders)
+		result := mergeRateLimitHeaders(toServeResult(gerrors.ServiceUnavailable), rlHeaders)
+		return stampCORSOnResult(result, route.CORS, origin)
 	}
 
 	reply, err := h.cfg.Decoder.Decode(replyBytes)
 	if err != nil {
+		reqLog := h.requestLogger(in, &route)
 		reqLog.Error().Err(err).Msg("reply decode failed")
-		return mergeRateLimitHeaders(toServeResult(gerrors.BadGateway), rlHeaders)
+		result := mergeRateLimitHeaders(toServeResult(gerrors.BadGateway), rlHeaders)
+		return stampCORSOnResult(result, route.CORS, origin)
 	}
 
 	mergedHeaders := mergeHeaders(reply.Headers, in.RequestID)
 	mergeAuthHeaders(mergedHeaders, authHeaders)
 
+	// Both merges below are non-destructive with a case-insensitive
+	// presence check: upstream reply keys arrive lowercase from the
+	// SDK, while gateway rate-limit headers and operator-configured
+	// route headers are canonical-cased. An exact-case check would
+	// add a second, differently-cased entry that Hertz folds onto the
+	// SAME canonical wire name — two conflicting X-RateLimit-Limit
+	// lines that recipients may comma-join or pick from arbitrarily.
 	for k, v := range rlHeaders {
-		if _, exists := mergedHeaders[k]; !exists {
+		if !headerPresentFold(mergedHeaders, k) {
 			mergedHeaders[k] = []string{v}
 		}
 	}
 
 	for k, v := range route.Headers {
-		if _, exists := mergedHeaders[k]; !exists {
+		if !headerPresentFold(mergedHeaders, k) {
 			mergedHeaders[k] = []string{v}
 		}
 	}
 
-	stampResponseCORS(mergedHeaders, route.CORS, in.Headers["origin"])
+	stampResponseCORS(mergedHeaders, route.CORS, origin)
 
 	// RFC 9110 §15.5.2 binds whoever GENERATES the 401 — on the wire
 	// that is this gateway, regardless of whether the upstream route
@@ -412,9 +460,91 @@ func (h *Handler) serve(ctx context.Context, in *ServeInput, obs *requestOutcome
 	}
 }
 
-// handlePreflight handles CORS OPTIONS preflight requests. It uses the
-// Access-Control-Request-Method header to find the actual route, then
-// returns 204 with the appropriate CORS headers if the origin matches.
+// authStageResult carries the auth-stage outputs back to serve.
+// Exactly one shape is populated:
+//
+//   - ShortCircuit non-nil → the verifier denied the request or the
+//     verifier round trip itself failed; serve returns it verbatim.
+//     The result is already merged with the rate-limit headers and
+//     CORS-stamped, so serve does not re-touch it.
+//   - ShortCircuit nil → the request proceeds. Claims carries the
+//     verifier's decoded body for the main envelope's auth field (nil
+//     on a public route or an optional-auth 401 swallow), AuthHeaders
+//     carries verifier response headers for the reply merge, and
+//     RouteHeaders is the header set forwarded to the main leg
+//     (credential-stripped once claims were decoded).
+type authStageResult struct {
+	ShortCircuit *ServeResult
+	Claims       json.RawMessage
+	AuthHeaders  map[string][]string
+	RouteHeaders map[string]string
+}
+
+// applyAuthStage runs the verifier flow for a protected route and folds
+// its outcome into the observability record (obs.auth). A public route
+// (no Auth block) is a no-op that echoes the inbound headers as the
+// route headers. The deadline is the shared per-request budget anchor;
+// the verifier leg draws its remaining slice from it.
+//
+// Extracted from serve so the obs.auth accounting lives next to the
+// decision that produces it while keeping serve within its
+// cognitive-complexity budget — the same decomposition applied to
+// runAuthFlow and applyRateLimitGate.
+func (h *Handler) applyAuthStage(
+	ctx context.Context,
+	in *ServeInput,
+	route routing.Route,
+	params map[string]string,
+	deadline time.Time,
+	rlHeaders map[string]string,
+	origin string,
+	obs *requestOutcome,
+) authStageResult {
+	if route.Auth == nil {
+		return authStageResult{RouteHeaders: in.Headers}
+	}
+
+	authOutcome := h.runAuthFlow(ctx, in, route, params, time.Until(deadline))
+	if !authOutcome.Proceed {
+		// 4xx short-circuits are verifier denials; 5xx means the
+		// verifier round trip itself failed (transport, decode).
+		obs.auth = outcomeDenied
+		if authOutcome.ShortCircuit.Status >= 500 {
+			obs.auth = outcomeError
+		}
+
+		result := mergeRateLimitHeaders(authOutcome.ShortCircuit, rlHeaders)
+
+		return authStageResult{ShortCircuit: stampCORSOnResult(result, route.CORS, origin)}
+	}
+
+	obs.auth = outcomeOK
+	if authOutcome.Claims == nil {
+		obs.auth = outcomeAnonymous
+	}
+
+	// Once the verifier has decoded the bearer token into structured
+	// claims, the raw credentials MUST NOT travel onto the route
+	// envelope. The claims are the contract the route handler consumes;
+	// forwarding the token alongside them lets any downstream service
+	// bypass the verifier (re-decode, store, replay) and silently
+	// breaks rotation, blacklists, and revocation. Cookie-auth is left
+	// untouched because cookie-auth is not yet wired through the
+	// verifier path.
+	return authStageResult{
+		Claims:       authOutcome.Claims,
+		AuthHeaders:  authOutcome.AuthHeaders,
+		RouteHeaders: stripAuthHeaders(in.Headers),
+	}
+}
+
+// handlePreflight handles CORS OPTIONS preflight requests. It uses
+// the Access-Control-Request-Method header to find the actual route,
+// then returns 204 with the appropriate CORS headers if the origin
+// matches. Handle dispatches here only for OPTIONS requests that
+// carry the ACRM header (the Fetch definition of a preflight); plain
+// OPTIONS goes through normal route lookup instead. The empty-ACRM
+// guard is defense-in-depth for direct callers.
 func (h *Handler) handlePreflight(table routing.Table, in *ServeInput) *ServeResult {
 	acrm := in.Headers["access-control-request-method"]
 	if acrm == "" {
@@ -573,7 +703,6 @@ func (h *Handler) applyRateLimitGate(
 	in *ServeInput,
 	claims json.RawMessage,
 	timeout time.Duration,
-	reqLog zerolog.Logger,
 	obs *requestOutcome,
 ) (map[string]string, *ServeResult) {
 	if route.RateLimit == nil || route.RateLimit.RPS <= 0 || h.cfg.RateLimiter == nil {
@@ -598,6 +727,7 @@ func (h *Handler) applyRateLimitGate(
 		// while conveying exactly one piece of actionable information.
 		routeKey := route.Method + ":" + route.PathTemplate
 		if _, alreadyLogged := h.claimsUnmarshalLogged.LoadOrStore(routeKey, struct{}{}); !alreadyLogged {
+			reqLog := h.requestLogger(in, &route)
 			reqLog.Warn().
 				Err(claimsErr).
 				Str("event", "ratelimit.claims.unmarshal_failed").
@@ -606,7 +736,7 @@ func (h *Handler) applyRateLimitGate(
 				Msg("ratelimit: verifier claims failed to unmarshal; routing through FailPolicy")
 		}
 
-		allowed := h.failPolicyFor(route).Apply(claimsErr, route, rlKey, reqLog)
+		allowed := h.failPolicyFor(route).Apply(claimsErr, route, rlKey, h.requestLogger(in, &route))
 
 		rlHeaders := ratelimit.BuildHeaders(route.RateLimit, ratelimit.Decision{})
 		if !allowed {
@@ -656,7 +786,7 @@ func (h *Handler) applyRateLimitGate(
 		// the unpopulated Decision verbatim) leaked Remaining: 0 /
 		// Reset: -62135596800 to clients on the fail-open branch.
 		decision = ratelimit.Decision{}
-		allowed = h.failPolicyFor(route).Apply(rlErr, route, fullKey, reqLog)
+		allowed = h.failPolicyFor(route).Apply(rlErr, route, fullKey, h.requestLogger(in, &route))
 	}
 
 	// Outcome accounting for the access log: a clean decision maps to
@@ -948,14 +1078,16 @@ type authFlowResult struct {
 // verifier sub-request alongside the main request. The verifier and
 // the main route share one timeout budget — the per-route Timeout —
 // because an upstream auth check that consumes the full budget
-// leaves nothing for the actual handler.
+// leaves nothing for the actual handler. The timeout argument is the
+// REMAINING slice of that budget at the moment the auth flow starts;
+// the caller recomputes the remainder after this function returns
+// and passes only what is left to the main route request.
 func (h *Handler) runAuthFlow(
 	ctx context.Context,
 	in *ServeInput,
 	route routing.Route,
 	params map[string]string,
 	timeout time.Duration,
-	reqLog zerolog.Logger,
 ) *authFlowResult {
 	verifyPayload := acquirePayload()
 	defer releasePayload(verifyPayload)
@@ -980,6 +1112,7 @@ func (h *Handler) runAuthFlow(
 		TimeoutMs:   timeout.Milliseconds(),
 	})
 	if err != nil {
+		reqLog := h.requestLogger(in, &route)
 		reqLog.Error().Err(err).Msg("auth: verify encode failed")
 		return &authFlowResult{Proceed: false, ShortCircuit: toServeResult(gerrors.InternalError)}
 	}
@@ -989,6 +1122,7 @@ func (h *Handler) runAuthFlow(
 		if isTimeoutErr(err) {
 			return &authFlowResult{Proceed: false, ShortCircuit: toServeResult(gerrors.GatewayTimeout)}
 		}
+		reqLog := h.requestLogger(in, &route)
 		reqLog.Error().
 			Err(err).
 			Str("subject", route.Auth.VerifierSubject).
@@ -999,14 +1133,28 @@ func (h *Handler) runAuthFlow(
 
 	reply, err := h.cfg.Decoder.Decode(replyBytes)
 	if err != nil {
+		reqLog := h.requestLogger(in, &route)
 		reqLog.Error().Err(err).Msg("auth: verifier reply decode failed")
 		return &authFlowResult{Proceed: false, ShortCircuit: toServeResult(gerrors.BadGateway)}
 	}
 
 	if reply.Status == 200 {
+		claims := reply.Body
+		// A verifier may legitimately reply 200 with a JSON null body
+		// (authenticated, no claims payload). json.RawMessage("null")
+		// is non-empty, so without normalisation the encoder would
+		// emit `"auth":null` — violating the envelope invariant that
+		// the auth key is ABSENT when there are no claims (consumers
+		// on pre-auth SDK builds must observe byte-identical
+		// envelopes). Normalising here also keeps the rate-limit gate
+		// consistent: null claims behave exactly like no claims.
+		if isJSONNull(claims) {
+			claims = nil
+		}
+
 		return &authFlowResult{
 			Proceed:     true,
-			Claims:      reply.Body,
+			Claims:      claims,
 			AuthHeaders: reply.Headers,
 		}
 	}
@@ -1067,11 +1215,29 @@ func stampDefaultWWWAuthenticate(status int, headers map[string][]string) {
 // the wire. The gateway always stamps its own x-request-id on top of
 // whatever the upstream service emitted, so a compromised upstream
 // cannot forge correlator ids.
+//
+// Gateway-owned keys are matched case-insensitively (RFC 9110 §5.1 —
+// field names are case-insensitive) because the reply map is attacker-
+// influenced input: upstream keys normally arrive lowercase from the
+// SDK, but a compromised or non-SDK responder can send "X-Request-Id"
+// as a distinct map key. Both variants land on the same canonical
+// wire name once Hertz folds them, and an exact-case overwrite would
+// leave the forged line alive next to the gateway's — defeating the
+// anti-spoofing invariant roughly half the time (map iteration
+// order). Upstream content-type overrides fold into the canonical
+// lowercase entry for the same reason.
 func mergeHeaders(reply map[string][]string, requestID string) map[string][]string {
 	out := make(map[string][]string, len(reply)+2)
 	out["content-type"] = []string{"application/json"}
 	for k, v := range reply {
-		out[k] = v
+		switch {
+		case strings.EqualFold(k, "x-request-id"):
+			// Gateway-owned; case-variant forgeries are dropped.
+		case strings.EqualFold(k, "content-type"):
+			out["content-type"] = v
+		default:
+			out[k] = v
+		}
 	}
 	out["x-request-id"] = []string{requestID}
 	return out
@@ -1093,6 +1259,14 @@ func mergeHeaders(reply map[string][]string, requestID string) map[string][]stri
 //
 // The merged map is mutated in place. Callers are expected to have
 // already run mergeHeaders so gateway defaults are baked in.
+//
+// Key comparisons are case-insensitive: verifier reply headers are
+// upstream-influenced input like the main reply's, so set-cookie is
+// recognised in any casing (an exact-match check would silently lose
+// the documented verifier-first cookie ordering for a case-variant
+// key), gateway-owned keys are excluded in any casing, and the
+// exists-check folds so a case-variant verifier key cannot shadow an
+// already-merged route header on the same canonical wire name.
 func mergeAuthHeaders(merged map[string][]string, authHeaders map[string][]string) {
 	if len(authHeaders) == 0 {
 		return
@@ -1103,7 +1277,12 @@ func mergeAuthHeaders(merged map[string][]string, authHeaders map[string][]strin
 			continue
 		}
 
-		if verifierKey == "set-cookie" {
+		if strings.EqualFold(verifierKey, "x-request-id") ||
+			strings.EqualFold(verifierKey, "content-type") {
+			continue
+		}
+
+		if strings.EqualFold(verifierKey, "set-cookie") {
 			existing := merged["set-cookie"]
 			combined := make([]string, 0, len(verifierValues)+len(existing))
 			combined = append(combined, verifierValues...)
@@ -1113,7 +1292,7 @@ func mergeAuthHeaders(merged map[string][]string, authHeaders map[string][]strin
 			continue
 		}
 
-		if _, exists := merged[verifierKey]; exists {
+		if headerPresentFold(merged, verifierKey) {
 			continue
 		}
 
@@ -1149,8 +1328,8 @@ func toServeResult(e gerrors.HTTPError) *ServeResult {
 
 // mergeRateLimitHeaders stamps every X-RateLimit-* header from the
 // rate-limit gate's pre-computed map onto a gateway-owned error
-// response. Non-destructive: existing keys win, mirroring the
-// happy-path merge below at line 249.
+// response. Non-destructive: existing keys win (case-insensitively),
+// mirroring the happy-path merge in Handle.
 //
 // Why error responses MUST carry rate-limit headers: a client whose
 // upstream call 5xx'd has STILL consumed a token from their rate-
@@ -1171,10 +1350,121 @@ func mergeRateLimitHeaders(result *ServeResult, rlHeaders map[string]string) *Se
 		return result
 	}
 	for k, v := range rlHeaders {
-		if _, exists := result.Headers[k]; !exists {
+		if !headerPresentFold(result.Headers, k) {
 			result.Headers[k] = []string{v}
 		}
 	}
 
 	return result
+}
+
+// headerPresentFold reports whether key is present in headers under
+// any casing. HTTP field names are case-insensitive (RFC 9110 §5.1)
+// and the response header map mixes lowercase upstream keys with
+// canonical-cased gateway keys — an exact-case presence check would
+// let two casings of the same field coexist and later collapse onto
+// one canonical wire name with conflicting values. The exact-match
+// fast path keeps the common case at one map lookup; the fold scan
+// only runs over the handful of entries a response carries.
+func headerPresentFold(headers map[string][]string, key string) bool {
+	if _, ok := headers[key]; ok {
+		return true
+	}
+	for k := range headers {
+		if strings.EqualFold(k, key) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// requestLogger builds the request-scoped logger on demand. zerolog's
+// With() allocates a ~500-byte context buffer per call, and the happy
+// path emits nothing — binding the logger eagerly per request burned
+// two heap allocations (~1 KiB) of discarded context on every
+// successful proxy cycle (measured by BenchmarkHandler_PublicRoute).
+// Error branches call this at the emit site instead, so the cost is
+// paid only when a line is actually written. The field set matches
+// the previous eager binding: request_id, traceparent, route.
+func (h *Handler) requestLogger(in *ServeInput, route *routing.Route) zerolog.Logger {
+	return h.cfg.Logger.With().
+		Str("request_id", in.RequestID).
+		Str("traceparent", in.Traceparent).
+		Str("route", route.Method+":"+route.PathTemplate).
+		Logger()
+}
+
+// allowProbeMethods is the verb set probed to build a 405 response's
+// Allow header. Matches the registrable verb union of the wire
+// contract (registry entry / SDK HTTP method type). Fixed order keeps
+// the Allow header deterministic.
+var allowProbeMethods = [...]string{"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
+
+// allowedMethods returns the verbs for which the table matches path,
+// excluding the verb the request already tried (its Lookup miss is
+// what brought the caller here). Probing Lookup per verb is
+// template-aware — a wrong-method request to "/users/42" finds the
+// route registered as "/users/:id" — unlike Table.Methods, whose
+// exact-template match cannot see parameterized routes and would
+// misclassify the mismatch as 404. The probe loop runs only on the
+// lookup-miss path, never on proxied traffic.
+func allowedMethods(table routing.Table, tried, path string) []string {
+	var allow []string
+	for _, method := range allowProbeMethods {
+		if method == tried {
+			continue
+		}
+		if _, _, ok := table.Lookup(method, path); ok {
+			allow = append(allow, method)
+		}
+	}
+
+	return allow
+}
+
+// rateLimitNeedsClaims reports whether the route's keyBy chain
+// contains a claims-keyed strategy (user:*). Decides the rate-limit
+// gate's position relative to the auth flow: claims-keyed chains must
+// gate after the verifier supplies claims; every other chain gates
+// before it. See the ordering rationale in Handle.
+func rateLimitNeedsClaims(route routing.Route) bool {
+	if route.RateLimit == nil {
+		return false
+	}
+	for _, key := range route.RateLimit.KeyBy {
+		if strings.HasPrefix(key, "user:") {
+			return true
+		}
+	}
+
+	return false
+}
+
+// stampCORSOnResult applies the route's CORS policy to a short-circuit
+// or error result before it returns to the client. Every response of
+// a matched CORS route — 400/401/429/5xx included — is subject to the
+// browser's CORS check: without Access-Control-Allow-Origin the
+// cross-origin caller cannot read the status (a session-expired 401
+// becomes indistinguishable from a network outage) or the exposed
+// X-RateLimit-*/Retry-After headers the route contract promises. The
+// stamp also appends Vary: Origin, which the origin-varying error
+// content needs for shared-cache correctness. Nil-safe on both the
+// result and the CORS config so call sites stay single-line.
+func stampCORSOnResult(result *ServeResult, cors *registry.CORSMeta, origin string) *ServeResult {
+	if result == nil || cors == nil {
+		return result
+	}
+	stampResponseCORS(result.Headers, cors, origin)
+
+	return result
+}
+
+// isJSONNull reports whether raw is the JSON null literal. Used to
+// normalise a verifier's explicit `"body": null` (which decodes to a
+// non-empty json.RawMessage) into absent claims at the auth-flow
+// boundary. Whitespace tolerance costs nothing and guards against
+// decoders that preserve surrounding space in raw values.
+func isJSONNull(raw json.RawMessage) bool {
+	return string(bytes.TrimSpace(raw)) == "null"
 }
