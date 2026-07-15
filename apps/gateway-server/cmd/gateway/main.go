@@ -190,7 +190,12 @@ func main() {
 	}()
 	logger.Info().Str("addr", cfg.HTTPAddr).Msg("http server started")
 
-	operatorServer := httptransport.NewOperatorServer(cfg, readinessSignal, metrics.Handler())
+	operatorServer := httptransport.NewOperatorServer(cfg, readinessSignal, metrics.Handler(),
+		func() routing.Table {
+			t, _ := currentTable.Load().(routing.Table)
+
+			return t
+		})
 	go func() {
 		if err := operatorServer.Run(); err != nil {
 			logger.Error().Err(err).Msg("operator http server exited unexpectedly")

@@ -17,6 +17,7 @@ import (
 
 	"github.com/HorizonRepublic/gateway/apps/gateway-server/internal/config"
 	"github.com/HorizonRepublic/gateway/apps/gateway-server/internal/proxy"
+	"github.com/HorizonRepublic/gateway/apps/gateway-server/internal/routing"
 )
 
 // ReadinessSignal reports whether the gateway is ready to serve
@@ -255,6 +256,7 @@ func NewOperatorServer(
 	cfg *config.Config,
 	readiness ReadinessSignal,
 	metrics http.Handler,
+	routeProvider func() routing.Table,
 ) *OperatorServer {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", liveHandler())
@@ -262,6 +264,10 @@ func NewOperatorServer(
 
 	if metrics != nil {
 		mux.Handle("/metrics", metrics)
+	}
+
+	if routeProvider != nil {
+		mux.HandleFunc("/admin/routes", newRouteDumpHandler(routeProvider))
 	}
 
 	mux.HandleFunc("/debug/pprof/", pprof.Index)

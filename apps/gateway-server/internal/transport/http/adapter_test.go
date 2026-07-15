@@ -369,6 +369,8 @@ func (f *fakeTable) Lookup(_, _ string) (routing.Route, map[string]string, bool)
 
 func (f *fakeTable) Methods(string) []string { return nil }
 
+func (f *fakeTable) Routes() []routing.Route { return nil }
+
 // fakeRequester is a proxy.NatsRequester double that returns a fixed
 // reply payload regardless of subject or timeout.
 type fakeRequester struct {

@@ -41,4 +41,12 @@ type Table interface {
 	// acceptable; it will be revisited alongside any future
 	// implementation swap.
 	Methods(path string) []string
+
+	// Routes returns every route in the table as an immutable
+	// snapshot, ordered deterministically by (method, path template,
+	// subject). It backs the operator admin introspection surface —
+	// answering "what routing table is this pod actually serving?" —
+	// and is never called on the request hot path. Callers MUST NOT
+	// mutate the returned slice or its elements.
+	Routes() []Route
 }
