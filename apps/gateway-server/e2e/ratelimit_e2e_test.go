@@ -60,8 +60,8 @@ func TestE2E_RateLimit_BurstAllowsThenLimits(t *testing.T) {
 		drainBody(resp)
 	}
 
-	assert.Equal(t, []int{http.StatusOK, http.StatusOK, http.StatusTooManyRequests}, statuses,
-		"rps=1 burst=2 ⇒ first two pass, third is rejected with 429")
+	assert.Equal(t, []int{http.StatusOK, http.StatusTooManyRequests, http.StatusTooManyRequests}, statuses,
+		"rps=1 burst=1 ⇒ first passes, the next two are rejected with 429 (canonical GCRA: burst=1 admits exactly one)")
 }
 
 func TestE2E_RateLimit_HeadersAlwaysPresent(t *testing.T) {
