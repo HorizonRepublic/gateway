@@ -128,6 +128,49 @@ func TestHeaderJoinSeparator(t *testing.T) {
 	}
 }
 
+// TestLowerHeaderKey pins the single-alloc lowercase helper to the
+// exact output string(bytes.ToLower(key)) produced for ASCII inputs,
+// including the invalid-but-possible non-ASCII bytes an adversarial
+// client can put on the wire (those pass through untouched — RFC 9110
+// §5.1 field names are ASCII tokens, so they match nothing downstream
+// either way).
+func TestLowerHeaderKey(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"canonical cased", "Content-Type", "content-type"},
+		{"all uppercase", "AUTHORIZATION", "authorization"},
+		{"already lowercase", "x-request-id", "x-request-id"},
+		{"empty", "", ""},
+		{"digits and symbols untouched", "X-Retry-2!", "x-retry-2!"},
+		{"non-ascii bytes pass through", "X-\xc3\x89tag", "x-\xc3\x89tag"},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			assert.Equal(t, c.want, lowerHeaderKey([]byte(c.in)))
+		})
+	}
+}
+
+// TestLowerHeaderKey_AllocationProfile pins the allocation contract
+// the helper exists for: exactly one allocation per call (the
+// resulting string) regardless of input casing. The generic
+// string(bytes.ToLower(key)) idiom it replaced costs two.
+func TestLowerHeaderKey_AllocationProfile(t *testing.T) {
+	var sink string
+	for _, in := range [][]byte{[]byte("Content-Type"), []byte("x-request-id")} {
+		key := in
+		allocs := testing.AllocsPerRun(100, func() {
+			sink = lowerHeaderKey(key)
+		})
+		assert.Equal(t, 1.0, allocs, "input %q", key)
+	}
+	_ = sink
+}
+
 func TestBuildServeInput_CollectsSingleValueQuery(t *testing.T) {
 	ctx := ut.CreateUtRequestContext("GET", "https://gateway.test/x?include=profile", nil)
 
@@ -144,6 +187,22 @@ func TestBuildServeInput_CollectsRepeatedQueryKey(t *testing.T) {
 
 	require.Contains(t, input.Query, "tag")
 	assert.Equal(t, proxy.NewQueryValueStrings([]string{"a", "b"}), input.Query["tag"])
+}
+
+// TestBuildServeInput_NoQueryStringYieldsNilQuery pins the
+// zero-alloc contract for the GET-heavy common case: a request
+// without a query string must surface Query as a nil map, not an
+// empty one. Downstream the envelope encoder ranges over the map
+// (nil-safe) into its pooled non-nil Query map, so the wire shape
+// stays `"query":{}` — TestAppendEnvelopeJSON_NilQueryEncodesAsEmptyObject
+// in the proxy package pins that half of the contract.
+func TestBuildServeInput_NoQueryStringYieldsNilQuery(t *testing.T) {
+	ctx := ut.CreateUtRequestContext("GET", "https://gateway.test/x", nil)
+
+	input := buildServeInput(ctx)
+
+	assert.Nil(t, input.Query,
+		"a query-less request must not allocate an empty Query map")
 }
 
 func TestBuildServeInput_CapturesTraceparentHeader(t *testing.T) {

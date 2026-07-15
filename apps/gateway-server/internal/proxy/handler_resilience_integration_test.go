@@ -384,10 +384,10 @@ func TestIntegration_GatewaySurvivesNATSOutage_RoutingTableIntact(t *testing.T) 
 
 	// 405: pure routing-table lookup against a path with a different verb.
 	mismatch := h.handler.Handle(context.Background(), newRequest("DELETE", "/users"))
-	// The linear table's Methods() does an exact-string compare against
+	// The routing table's Methods() does an exact-string compare against
 	// PathTemplate (see routing/table.go godoc), so a static path like
 	// /users does carry a non-empty Methods slice and the proxy returns
-	// 405. A future trie swap would make this assertion stricter.
+	// 405. A future template-aware Methods would make this assertion stricter.
 	assert.Equal(t, 405, mismatch.Status, "405 method-mismatch is NATS-independent")
 	assert.NotEmpty(t, mismatch.Headers["Allow"], "405 must carry Allow header per RFC 9110 §15.5.6")
 
