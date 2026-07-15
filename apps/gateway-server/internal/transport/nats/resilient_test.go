@@ -436,6 +436,19 @@ func TestResilientRequester_ConcurrentMixedSubjects(t *testing.T) {
 		"overflow-1__microservice.cmd.x",
 	}
 
+	// Deterministically claim the four dedicated breaker slots for the
+	// services whose outcome this test pins — the three good-* and the
+	// failing bad — before the racing goroutines start. With the cap at
+	// 4 and six distinct services, concurrent lazy creation assigns
+	// dedicated vs shared-fallback breakers in nondeterministic order;
+	// without this warm-up a good-* service could land on the shared
+	// breaker that bad's failures open, making "healthy dedicated
+	// service always succeeds" a false assertion. The two overflow-*
+	// services still exercise the shared-fallback path below.
+	for _, s := range subjects[:4] {
+		_, _ = r.Request(context.Background(), s, nil, time.Second)
+	}
+
 	var wg sync.WaitGroup
 	for i := range 32 {
 		wg.Add(1)
