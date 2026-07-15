@@ -257,13 +257,32 @@ const encodeCookieToken = (name: string): string => {
 const PATH_VALUE = /^[ -:<-~]*$/;
 
 /**
+ * One RFC 1034 §3.5 label as refined by RFC 1123 §2.1: letters,
+ * digits, and interior hyphens — a single alphanumeric, or an
+ * alphanumeric-delimited run. The 63-octet cap is checked separately
+ * in {@link isDomainValue}; spelling the one-char case as an
+ * alternation keeps every quantifier un-nested (star height 1), so
+ * the match is backtracking-safe.
+ */
+const DOMAIN_LABEL = /^(?:[a-z0-9]|[a-z0-9][a-z0-9-]*[a-z0-9])$/i;
+
+/**
  * rfc6265bis §4.1.1 `domain-value = <subdomain>` per RFC 1034 §3.5 as
  * refined by RFC 1123 §2.1: dot-separated labels of letters, digits,
  * and interior hyphens, 1–63 octets each. A single leading `.` is
- * tolerated because rfc6265bis instructs UAs to ignore it.
+ * tolerated because rfc6265bis instructs UAs to ignore it. Validated
+ * label-by-label — one anchored regex per label is linear-time, where
+ * a whole-host regex would need backtracking-prone nested groups.
  */
-const DOMAIN_VALUE =
-  /^\.?[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/i;
+const isDomainValue = (domain: string): boolean => {
+  const host = domain.startsWith('.') ? domain.slice(1) : domain;
+
+  if (host.length === 0) {
+    return false;
+  }
+
+  return host.split('.').every((label) => label.length <= 63 && DOMAIN_LABEL.test(label));
+};
 
 /**
  * Fail-closed validation of the attributes that are interpolated into
@@ -281,7 +300,7 @@ const DOMAIN_VALUE =
  * bug, not a runtime condition to paper over.
  */
 const assertWireSafeAttributes = (name: string, merged: ICookieOptions): void => {
-  if (merged.domain !== undefined && !DOMAIN_VALUE.test(merged.domain)) {
+  if (merged.domain !== undefined && !isDomainValue(merged.domain)) {
     throw new Error(
       `gateway: cookie ${name} has an invalid Domain attribute ` +
         `(${JSON.stringify(merged.domain)}) — must be a host name per RFC 1123. ` +

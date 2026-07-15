@@ -286,6 +286,15 @@ describe('serializeCookie — attribute-injection guards (rfc6265bis §4.1.1 gra
     expect(() => serializeCookie('sid', 'v', { domain: '' })).toThrow(/Domain/);
   });
 
+  it('throws when a domain label exceeds 63 octets (RFC 1034 §3.5 cap)', () => {
+    const oversized = `${'a'.repeat(64)}.example.com`;
+
+    expect(() => serializeCookie('sid', 'v', { domain: oversized })).toThrow(/Domain/);
+    expect(serializeCookie('sid', 'v', { domain: `${'a'.repeat(63)}.example.com` })).toBe(
+      `sid=v; Domain=${'a'.repeat(63)}.example.com`,
+    );
+  });
+
   it('accepts a leading-dot domain (UAs ignore the dot)', () => {
     expect(serializeCookie('sid', 'v', { domain: '.example.com' })).toBe(
       'sid=v; Domain=.example.com',
