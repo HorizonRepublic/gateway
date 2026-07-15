@@ -87,7 +87,16 @@ func BuildPreflightHeaders(cors *registry.CORSMeta, matchedOrigin string) map[st
 		h["Access-Control-Allow-Credentials"] = "true"
 	}
 
-	if cors.MaxAge > 0 {
+	// Emitted for every non-negative value, including 0: the SDK
+	// validates maxAge as a non-negative integer and 0 means "do not
+	// cache this preflight" — omitting it would silently fall back to
+	// the Fetch standard's 5-second default cache. The wire type
+	// cannot distinguish an explicit 0 from an unset field (plain int
+	// with omitempty), so unset routes also emit 0; do-not-cache is
+	// the fail-safe reading, and preflights are answered locally at
+	// negligible cost. Negative values cannot arrive through the
+	// validated contract and are treated as absent.
+	if cors.MaxAge >= 0 {
 		h["Access-Control-Max-Age"] = strconv.Itoa(cors.MaxAge)
 	}
 

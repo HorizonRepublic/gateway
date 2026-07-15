@@ -229,3 +229,36 @@ func TestBuildResponseCORSHeaders_NilCORSReturnsNil(t *testing.T) {
 		assert.Nil(t, got)
 	})
 }
+
+// TestBuildPreflightHeaders_MaxAgeZeroEmitsHeader pins the explicit
+// disable: the SDK validates maxAge as a non-negative integer, and 0
+// means "do not cache this preflight". An omitted header would fall
+// back to the Fetch standard's 5-second default cache instead —
+// silently reinterpreting the operator's configuration.
+func TestBuildPreflightHeaders_MaxAgeZeroEmitsHeader(t *testing.T) {
+	cors := &registry.CORSMeta{
+		Origins: []string{"https://app.example.com"},
+		MaxAge:  0,
+	}
+
+	h := BuildPreflightHeaders(cors, "https://app.example.com")
+
+	assert.Equal(t, "0", h["Access-Control-Max-Age"],
+		"maxAge 0 must reach the wire as an explicit cache disable")
+}
+
+// TestBuildPreflightHeaders_NegativeMaxAgeOmitsHeader pins the
+// defensive lower bound: negative values cannot arrive through the
+// validated wire contract, so a hand-written KV entry carrying one is
+// treated as absent rather than emitted as garbage.
+func TestBuildPreflightHeaders_NegativeMaxAgeOmitsHeader(t *testing.T) {
+	cors := &registry.CORSMeta{
+		Origins: []string{"https://app.example.com"},
+		MaxAge:  -1,
+	}
+
+	h := BuildPreflightHeaders(cors, "https://app.example.com")
+
+	_, present := h["Access-Control-Max-Age"]
+	assert.False(t, present, "negative maxAge must not reach the wire")
+}
