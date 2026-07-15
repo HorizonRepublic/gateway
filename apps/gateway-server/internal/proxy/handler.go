@@ -856,6 +856,14 @@ func stripAuthHeaders(in map[string]string) map[string]string {
 // `session="abc"`, and `session= abc` all collapse to "abc". Without
 // this normalisation, equivalent cookies would land in distinct
 // rate-limit buckets.
+//
+// The cookie NAME is trimmed of surrounding whitespace before the
+// comparison (RFC 6265bis cookie-string parsing removes leading and
+// trailing WSP from the name string), so `session =abc` resolves the
+// same way on the SDK and gateway sides. Pairs without "=" (or with
+// nothing before it) are nameless cookies under the same parsing
+// rules and never match a named lookup; the SDK's parseCookies skips
+// them identically.
 func extractCookie(headers map[string]string, name string) (string, bool) {
 	cookieHeader := headers["cookie"]
 	if cookieHeader == "" {
@@ -871,7 +879,7 @@ func extractCookie(headers map[string]string, name string) (string, bool) {
 	for _, part := range strings.Split(cookieHeader, ";") {
 		part = strings.TrimSpace(part)
 		eqIdx := strings.IndexByte(part, '=')
-		if eqIdx <= 0 || part[:eqIdx] != name {
+		if eqIdx <= 0 || strings.TrimSpace(part[:eqIdx]) != name {
 			continue
 		}
 
