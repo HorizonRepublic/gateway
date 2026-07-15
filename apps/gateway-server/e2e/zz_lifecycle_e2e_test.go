@@ -56,15 +56,26 @@ func TestE2E_Resilience_NATSRestartRecovery(t *testing.T) {
 	StartNATS(t)
 	WaitForGatewayHealthy(t, GatewayURL(t))
 
-	// Final probe: explicit re-check that recovery is observable
-	// for THIS test (WaitForGatewayHealthy proved it via the same
-	// path; pinning the status here makes the test's intent visible
-	// without parsing the helper).
-	respAfter, err := http.Get(GatewayURL(t) + "/users/alice")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = respAfter.Body.Close() })
-	assert.Equal(t, http.StatusOK, respAfter.StatusCode,
-		"after NATS restart + recovery wait, gateway MUST serve again")
+	// Final probe: explicit re-check that recovery is observable for
+	// THIS test. WaitForGatewayHealthy confirms the readiness signal
+	// (NATS reconnected AND a routing snapshot has landed), but the
+	// route entry itself re-registers through a separate async chain
+	// — example-app re-publishes its handler metadata to KV via
+	// nestjs-jetstream after ITS own reconnect, and the gateway
+	// watcher applies that delta a beat later. Recovery of a specific
+	// route is therefore eventual, not simultaneous with readyz; poll
+	// until it serves rather than pinning a single instant that races
+	// the re-registration.
+	require.Eventually(t, func() bool {
+		resp, err := http.Get(GatewayURL(t) + "/users/alice")
+		if err != nil {
+			return false
+		}
+		_ = resp.Body.Close()
+
+		return resp.StatusCode == http.StatusOK
+	}, 30*time.Second, 250*time.Millisecond,
+		"after NATS restart + recovery wait, gateway MUST serve the route again")
 
 	// Brief settle margin: lets in-flight metadata refreshes finish
 	// before TestMain runs compose.Down. Not load-bearing for the

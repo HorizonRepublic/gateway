@@ -135,6 +135,20 @@ func NewServer(
 	// recovery below. Registering the custom recovery on top of Default
 	// would leave dead middleware in the chain — the inner handler
 	// would win every panic and the stock one would never fire.
+	// WithSenseClientDisconnection makes Hertz cancel the
+	// per-connection context (the stdCtx forwarded to the proxy
+	// handler by the adapter) when the client's TCP connection drops.
+	// The option defaults to false, in which case an abandoned request
+	// keeps its NATS round trip alive for the full per-route timeout —
+	// pinning one NATS in-flight semaphore slot and one HTTP
+	// concurrency slot per fire-and-disconnect request, capacity the
+	// admission layer can never shed early. Enabling it is what makes
+	// the requester's no-orphan-IO contract hold end-to-end. The
+	// cancellation is wired inside Hertz's transports (netpoll — the
+	// default on Linux/macOS — registers an OnDisconnect callback that
+	// cancels the connection ctx; the standard transport polls the
+	// socket); a future transport override must re-verify the option
+	// still applies.
 	h := server.New(
 		server.WithHostPorts(cfg.HTTPAddr),
 		server.WithMaxRequestBodySize(maxBody),
@@ -144,6 +158,7 @@ func NewServer(
 		server.WithIdleTimeout(cfg.IdleTimeout),
 		server.WithExitWaitTime(cfg.ShutdownTimeout),
 		server.WithKeepAlive(true),
+		server.WithSenseClientDisconnection(true),
 		withNoDefaultServerHeader(),
 	)
 

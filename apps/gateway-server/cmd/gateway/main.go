@@ -77,6 +77,7 @@ func main() {
 	metrics := observability.NewMetrics()
 
 	nc := connectNATSOrDie(cfg, logger)
+	validatePayloadBudgetOrDie(nc, cfg, logger)
 	js, kv := openKVOrDie(retryCtx, nc, cfg, logger)
 
 	store := registry.NewStore()
@@ -260,6 +261,21 @@ func connectNATSOrDie(cfg *config.Config, logger zerolog.Logger) *natsgo.Conn {
 		logger.Fatal().Err(err).Msg("nats connect failed")
 	}
 	return nc
+}
+
+// validatePayloadBudgetOrDie verifies at startup that a maximal HTTP
+// request (body at HTTP_MAX_BODY_BYTES, headers at
+// HTTP_MAX_HEADER_BYTES) still fits the connected NATS server's
+// max_payload once wrapped in the request envelope. Fatal on misfit:
+// a gateway whose HTTP guards admit requests that deterministically
+// fail at NATS publish time would surface a permanent config error as
+// per-request 4xx/5xx noise instead of one loud startup failure. The
+// live Conn.MaxPayload() is used — the server advertises the value in
+// the INFO handshake, so the check reflects the actual cluster.
+func validatePayloadBudgetOrDie(nc *natsgo.Conn, cfg *config.Config, logger zerolog.Logger) {
+	if err := natstransport.ValidatePayloadBudget(nc.MaxPayload(), cfg.MaxBodyBytes, cfg.MaxHeaderBytes); err != nil {
+		logger.Fatal().Err(err).Msg("nats payload budget validation failed")
+	}
 }
 
 // openKVOrDie initializes the JetStream client and opens the

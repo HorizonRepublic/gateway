@@ -55,6 +55,7 @@ const (
 	StatusTooManyRequests    = 429
 	StatusNotFound           = 404
 	StatusMethodNotAllowed   = 405
+	StatusContentTooLarge    = 413
 	StatusInternalError      = 500
 	StatusBadGateway         = 502
 	StatusServiceUnavailable = 503
@@ -94,6 +95,14 @@ var (
 	// exceeds the per-route rate limit configured in the handler
 	// registry.
 	TooManyRequests HTTPError
+	// ContentTooLarge is the 413 response returned when the request
+	// envelope exceeds the NATS server's max_payload and nats.go
+	// rejects the publish client-side with ErrMaxPayload. The startup
+	// payload-budget check makes this unreachable for in-contract
+	// requests; the mapping is defense-in-depth for residual envelope
+	// inflation (e.g. oversized verifier claims). RFC 9110 §15.5.14
+	// names the status "Content Too Large".
+	ContentTooLarge HTTPError
 	// InternalError is the generic 500 response returned when the
 	// proxy fails to encode the outbound envelope or hits an
 	// unexpected internal condition.
@@ -117,6 +126,7 @@ func init() {
 	NotFound = build(StatusNotFound, "Not Found")
 	MethodNotAllowed = build(StatusMethodNotAllowed, "Method Not Allowed")
 	TooManyRequests = build(StatusTooManyRequests, "Too Many Requests")
+	ContentTooLarge = build(StatusContentTooLarge, "Content Too Large")
 	InternalError = build(StatusInternalError, "Internal Server Error")
 	ServiceUnavailable = build(StatusServiceUnavailable, "Service Unavailable")
 	GatewayTimeout = build(StatusGatewayTimeout, "Gateway Timeout")

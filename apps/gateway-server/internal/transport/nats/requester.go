@@ -16,10 +16,11 @@ import (
 // A single nats.Conn is goroutine-safe but funnels all sends through
 // one socket, which becomes a contention point at very high RPS.
 // Holding N parallel connections and distributing requests across them
-// scales linearly up to NIC saturation. The pool size is configured
-// via NATS_CONNECTION_POOL (default 1); only increase it when
-// profiling shows socket-level contention, never as a speculative
-// optimisation.
+// scales linearly up to NIC saturation. There is no operator-facing
+// knob for the pool size: the production bootstrap wires exactly one
+// connection (see buildRequesterOrDie in cmd/gateway), and growing the
+// pool is a code change justified only by profiling evidence of
+// socket-level contention, never a speculative optimisation.
 //
 // The Requester is safe for concurrent use from any number of
 // goroutines — the only shared state is the atomic round-robin
@@ -48,11 +49,15 @@ func NewRequester(conns []*natsgo.Conn) (*Requester, error) {
 // Request sends an RPC request to subject and waits for a reply.
 //
 // The supplied ctx propagates the inbound HTTP request lifetime down
-// into the NATS round trip via nats.Conn.RequestWithContext. If the
-// HTTP client disconnects mid-flight or the caller cancels ctx, the
-// request returns immediately with the wrapped ctx error instead of
-// running to the full timeout — matching the no-orphan-IO contract the
-// gateway expects from every outbound dependency.
+// into the NATS round trip via nats.Conn.RequestWithContext. When ctx
+// is cancelled the request returns immediately with the wrapped ctx
+// error instead of running to the full timeout — matching the
+// no-orphan-IO contract the gateway expects from every outbound
+// dependency. Whether an HTTP client disconnect actually cancels ctx
+// is the HTTP layer's responsibility: the public Hertz listener is
+// built with WithSenseClientDisconnection so the per-connection
+// context (and therefore this ctx) is cancelled when the client's TCP
+// connection drops (netpoll transport; see transport/http.NewServer).
 //
 // The timeout argument is layered ON TOP of ctx: a child context with
 // timeout is derived from ctx so the effective deadline is min(ctx
@@ -99,9 +104,13 @@ func (r *Requester) Request(
 	return msg.Data, nil
 }
 
-// Close drains every underlying connection. Drain waits for in-flight
-// subscriptions to finish before tearing down the socket, giving
-// handlers a chance to complete cleanly on shutdown.
+// Close initiates a drain on every underlying connection. nats.go's
+// Conn.Drain is asynchronous: it flips the connection into the
+// draining state and returns immediately, while a background goroutine
+// finishes in-flight subscriptions and publishes and then closes the
+// socket. Callers that must not outlive the teardown (the lifecycle
+// drain sequence) wait on Conn.IsClosed; Close itself only starts the
+// process.
 func (r *Requester) Close() {
 	for _, c := range r.conns {
 		_ = c.Drain()

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -202,6 +203,27 @@ func TestHandler_Returns504OnTimeout(t *testing.T) {
 
 	assert.Equal(t, 504, result.Status)
 	assert.Equal(t, gerrors.GatewayTimeout.Body, result.Body)
+}
+
+func TestHandler_Returns413OnMaxPayloadRejection(t *testing.T) {
+	// nats.go rejects messages exceeding the server-advertised
+	// max_payload client-side with ErrMaxPayload before they touch
+	// the wire. That is a request-shape problem, not upstream
+	// degradation: mapping it to 503 would mislead clients into
+	// retrying a permanently-oversized request. The transport wraps
+	// the sentinel with the subject; simulate the same shape.
+	table := &fakeTable{routes: map[string]routing.Route{
+		"POST /users": {Subject: "svc.cmd.users.create", PathTemplate: "/users", Method: "POST"},
+	}}
+	wrapped := fmt.Errorf("nats request %q: %w", "svc.cmd.users.create", natsgo.ErrMaxPayload)
+	h := buildHandler(table, nil, wrapped)
+
+	result := h.Handle(context.Background(), emptyServeInput("POST", "/users"))
+
+	assert.Equal(t, 413, result.Status)
+	assert.Equal(t, gerrors.ContentTooLarge.Body, result.Body)
+	assert.True(t, result.GatewayOwnedBody,
+		"413 is a gateway-produced failure shape and must carry Cache-Control: no-store downstream")
 }
 
 func TestHandler_Returns503OnNatsError(t *testing.T) {

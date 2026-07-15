@@ -35,3 +35,17 @@ func isTimeoutErr(err error) bool {
 		errors.Is(err, context.DeadlineExceeded) ||
 		errors.Is(err, context.Canceled)
 }
+
+// isPayloadTooLargeErr reports whether err is nats.go's client-side
+// rejection of a message exceeding the server-advertised max_payload
+// (nats.ErrMaxPayload, raised at publish time before the message
+// touches the wire). The handler maps a positive result to 413
+// Content Too Large: the failure describes the request's size, not
+// upstream health, so 503 would mislead clients into retrying a
+// permanently-oversized request and pollute outage dashboards. The
+// bootstrap's payload-budget check makes this branch unreachable for
+// in-contract requests; it remains as defense-in-depth for residual
+// envelope inflation (e.g. oversized verifier claims).
+func isPayloadTooLargeErr(err error) bool {
+	return errors.Is(err, natsgo.ErrMaxPayload)
+}

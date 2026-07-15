@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	natsgo "github.com/nats-io/nats.go"
 	"github.com/rs/zerolog"
 	"github.com/sony/gobreaker"
 	"github.com/stretchr/testify/assert"
@@ -339,6 +340,36 @@ func TestResilientRequester_ClientCancellationDoesNotTripBreaker(t *testing.T) {
 		"deadline expiry must still count toward the failure threshold")
 }
 
+func TestResilientRequester_MaxPayloadRejectionDoesNotTripBreaker(t *testing.T) {
+	const subject = "svc-a__microservice.cmd.x"
+
+	inner := &fakeInner{}
+	// nats.go rejects over-max_payload messages client-side with
+	// ErrMaxPayload before they touch the wire; the requester wraps it
+	// with the subject. Simulate the same shape.
+	inner.setSubjectErr(subject, fmt.Errorf("nats request %q: %w", subject, natsgo.ErrMaxPayload))
+	r := NewResilientRequester(inner, ResilientConfig{
+		BreakerEnabled:   true,
+		FailureThreshold: 3,
+		RecoveryTimeout:  time.Hour,
+		HalfOpenProbes:   1,
+	}, zerolog.Nop())
+
+	// Well past the failure threshold: an oversized request describes
+	// the request's shape (mapped to 413 upstream), not the target
+	// service's health — a client looping oversized payloads must not
+	// open a healthy service's breaker.
+	for range 10 {
+		_, err := r.Request(context.Background(), subject, nil, time.Second)
+		require.Error(t, err, "the rejection still propagates to the caller")
+		require.ErrorIs(t, err, natsgo.ErrMaxPayload)
+		require.NotErrorIs(t, err, ErrCircuitOpen,
+			"payload-size rejections must not count as breaker failures")
+	}
+	assert.Equal(t, 10, inner.callCountFor(subject),
+		"every request must have reached the inner requester")
+}
+
 func TestResilientRequester_BreakerSnapshots(t *testing.T) {
 	const (
 		subjectA = "svc-a__microservice.cmd.x"
@@ -403,6 +434,19 @@ func TestResilientRequester_ConcurrentMixedSubjects(t *testing.T) {
 		"bad__microservice.cmd.x",
 		"overflow-0__microservice.cmd.x",
 		"overflow-1__microservice.cmd.x",
+	}
+
+	// Deterministically claim the four dedicated breaker slots for the
+	// services whose outcome this test pins — the three good-* and the
+	// failing bad — before the racing goroutines start. With the cap at
+	// 4 and six distinct services, concurrent lazy creation assigns
+	// dedicated vs shared-fallback breakers in nondeterministic order;
+	// without this warm-up a good-* service could land on the shared
+	// breaker that bad's failures open, making "healthy dedicated
+	// service always succeeds" a false assertion. The two overflow-*
+	// services still exercise the shared-fallback path below.
+	for _, s := range subjects[:4] {
+		_, _ = r.Request(context.Background(), s, nil, time.Second)
 	}
 
 	var wg sync.WaitGroup

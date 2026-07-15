@@ -9,10 +9,13 @@
 //  2. The registry watcher — must stop its internal goroutine so it
 //     no longer attempts to replace the store snapshot after we have
 //     begun shutting down.
-//  3. The NATS connection(s) — Drain waits for in-flight subscriptions
-//     and publishes to finish before tearing down the socket, which
-//     is what gives the gateway its "no request left behind" guarantee
-//     during rolling deployments.
+//  3. The NATS connection(s) — Drain flushes in-flight subscriptions
+//     and publishes before tearing down the socket. nats.go's
+//     Conn.Drain only INITIATES that process (it returns immediately
+//     while a background goroutine finishes the drain and closes the
+//     connection), so the drain step here waits for the connection to
+//     report closed — that wait is what gives the gateway its "no
+//     request left behind" guarantee during rolling deployments.
 //  4. (Implicit) any per-request goroutines spawned by the Hertz
 //     handler — these are owned by Hertz and drained by its own
 //     Shutdown call.
@@ -58,8 +61,15 @@ type HTTPServer interface {
 // NATSConn is the narrow contract the Drain routine needs from a
 // nats.Conn. Same rationale as HTTPServer: keeps the drain sequence
 // testable against a fake.
+//
+// Both methods mirror nats.Conn exactly. Drain only INITIATES the
+// drain (nats.go flips the connection into the draining state and
+// returns immediately while a background goroutine finishes the
+// work); IsClosed is what lets drainNATS observe the moment that
+// background goroutine has actually closed the connection.
 type NATSConn interface {
 	Drain() error
+	IsClosed() bool
 }
 
 // WatcherStopper is the narrow contract the Drain routine needs from
@@ -115,8 +125,10 @@ type Options struct {
 	// for boot paths that have no rate limiting wired, and for unit
 	// fixtures of Drain itself.
 	RateLimit RouterCloser
-	// NATS is the NATS connection whose Drain method waits for
-	// in-flight subscriptions and publishes to finish.
+	// NATS is the NATS connection to drain. Drain only initiates the
+	// teardown (nats.go completes it on a background goroutine), so
+	// the drain step polls IsClosed until the connection reports
+	// closed or the shutdown budget expires.
 	NATS NATSConn
 	// Timeout bounds the entire drain sequence. If a single step
 	// exceeds it, the remaining steps still run but with an expired
@@ -287,44 +299,83 @@ func closeRateLimitRouter(opts Options) {
 		Msg("shutdown step: ratelimit router complete")
 }
 
-// drainNATS waits for in-flight subscriptions and publishes on the
-// NATS connection to finish before tearing down the socket. Errors
-// are logged but do not abort the shutdown.
+// natsDrainPollInterval is how often drainNATS re-checks IsClosed
+// while waiting for the background drain to finish. Polling (instead
+// of a ClosedHandler) keeps the wait local to this step: swapping the
+// connection's closed callback here would silently replace the
+// logging handler installed at connect time, and 10ms of worst-case
+// added latency is noise against a shutdown budget measured in
+// seconds.
+const natsDrainPollInterval = 10 * time.Millisecond
+
+// drainNATS drains the NATS connection and waits until the connection
+// reports closed. Errors are logged but do not abort the shutdown.
 //
-// Drain runs on a worker goroutine so a hung NATS connection cannot
-// block the gateway past the configured shutdown timeout. The
-// deadline is the SHARED ctx from Drain — not a fresh timer — so
-// the NATS step cannot escape the global shutdown budget. If HTTP
-// shutdown already consumed most of it, NATS gets only what remains;
-// on timeout the lifecycle layer logs at WARN (timeout is a
-// lifecycle signal, not a defect) and yields control to the process
-// exit path. The orphan goroutine completes whenever the underlying
-// socket finally drops.
+// nats.go's Conn.Drain is asynchronous: it flips the connection into
+// the draining state, spawns a background goroutine that finishes
+// in-flight subscriptions and publishes and then closes the socket,
+// and returns nil immediately. Treating that return as "drained"
+// would log completion microseconds after the call while the real
+// drain still runs — and main would then exit, killing the socket
+// mid-drain. So this step calls Drain to start the process and then
+// polls IsClosed until the connection is actually gone.
+//
+// The Drain call itself runs on a worker goroutine so a hung
+// connection (e.g. a mutex wedged by a dying socket) cannot block the
+// gateway past the configured shutdown timeout. The deadline is the
+// SHARED ctx from Drain — not a fresh timer — so the NATS step cannot
+// escape the global shutdown budget. If HTTP shutdown already
+// consumed most of it, NATS gets only what remains; on timeout the
+// lifecycle layer logs at WARN (timeout is a lifecycle signal, not a
+// defect) and yields control to the process exit path. The orphan
+// goroutine completes whenever the underlying socket finally drops.
 func drainNATS(ctx context.Context, opts Options) {
 	opts.Logger.Debug().Msg("shutdown step: nats drain")
 	start := time.Now()
 
-	done := make(chan error, 1)
+	initiated := make(chan error, 1)
 	go func() {
-		done <- opts.NATS.Drain()
+		initiated <- opts.NATS.Drain()
 	}()
 
-	select {
-	case err := <-done:
-		if err != nil {
-			opts.Logger.Error().
-				Err(err).
+	ticker := time.NewTicker(natsDrainPollInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case err := <-initiated:
+			if err != nil {
+				opts.Logger.Error().
+					Err(err).
+					Dur("elapsed", time.Since(start)).
+					Msg("nats drain failed")
+				return
+			}
+			// Drain has only been INITIATED; disable this case (a
+			// receive on a nil channel blocks forever) and keep
+			// polling until the background drain closes the
+			// connection. Check immediately so an already-completed
+			// drain does not pay a full poll interval.
+			initiated = nil
+			if opts.NATS.IsClosed() {
+				opts.Logger.Info().
+					Dur("elapsed", time.Since(start)).
+					Msg("shutdown step: nats drain complete")
+				return
+			}
+		case <-ticker.C:
+			if opts.NATS.IsClosed() {
+				opts.Logger.Info().
+					Dur("elapsed", time.Since(start)).
+					Msg("shutdown step: nats drain complete")
+				return
+			}
+		case <-ctx.Done():
+			opts.Logger.Warn().
+				Err(ctx.Err()).
 				Dur("elapsed", time.Since(start)).
-				Msg("nats drain failed")
+				Msg("nats drain timed out; forcing shutdown")
 			return
 		}
-		opts.Logger.Info().
-			Dur("elapsed", time.Since(start)).
-			Msg("shutdown step: nats drain complete")
-	case <-ctx.Done():
-		opts.Logger.Warn().
-			Err(ctx.Err()).
-			Dur("elapsed", time.Since(start)).
-			Msg("nats drain timed out; forcing shutdown")
 	}
 }
