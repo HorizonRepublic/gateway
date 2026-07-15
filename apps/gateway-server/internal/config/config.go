@@ -152,6 +152,28 @@ type Config struct {
 	// preserve only the immediate predecessor.
 	TrustedProxyHeader string `env:"TRUSTED_PROXY_HEADER" envDefault:"X-Forwarded-For"`
 
+	// IPDenyListRaw is the operator-facing `IP_DENYLIST` env value:
+	// a comma-separated CIDR list whose RESOLVED client IPs (the
+	// trusted-proxy walk's output, never a spoofable header) are
+	// rejected with 403 before the request reaches the rate-limit gate
+	// or handler. Empty disables the denylist. Kept verbatim for
+	// diagnostics; parsed into IPDenyList by Load().
+	IPDenyListRaw string `env:"IP_DENYLIST"`
+
+	// IPAllowListRaw is the operator-facing `IP_ALLOWLIST` env value.
+	// When non-empty, ONLY resolved client IPs inside one of its CIDRs
+	// are served; every other address (including an unresolvable peer)
+	// gets 403. Empty disables the allowlist. This is the fail-closed
+	// counterpart to the denylist — use it to pin a gateway to a known
+	// ingress range. Parsed into IPAllowList by Load().
+	IPAllowListRaw string `env:"IP_ALLOWLIST"`
+
+	// IPDenyList / IPAllowList are the parsed CIDR lists consumed by
+	// the HTTP IP-filter middleware. Populated by Load(); not env
+	// fields (derived from the *Raw values above).
+	IPDenyList  []*net.IPNet `env:"-"`
+	IPAllowList []*net.IPNet `env:"-"`
+
 	// NATSUrls is the comma-separated list of NATS server URLs to
 	// connect to. Supports a single URL, a static cluster list, or a
 	// DNS-resolvable hostname (the nats.go client resolves A/SRV
@@ -396,6 +418,18 @@ func Load() (*Config, error) {
 			cfg.TrustedProxiesRaw, err)
 	}
 	cfg.TrustedProxies = trusted
+
+	denyList, err := trustedproxy.ParseCIDRList(cfg.IPDenyListRaw)
+	if err != nil {
+		return nil, fmt.Errorf("parse IP_DENYLIST=%q: %w", cfg.IPDenyListRaw, err)
+	}
+	cfg.IPDenyList = denyList
+
+	allowList, err := trustedproxy.ParseCIDRList(cfg.IPAllowListRaw)
+	if err != nil {
+		return nil, fmt.Errorf("parse IP_ALLOWLIST=%q: %w", cfg.IPAllowListRaw, err)
+	}
+	cfg.IPAllowList = allowList
 
 	canonical, ok := allowedTrustedProxyHeaders[strings.ToLower(strings.TrimSpace(cfg.TrustedProxyHeader))]
 	if !ok {
