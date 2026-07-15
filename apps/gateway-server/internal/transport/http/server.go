@@ -2,6 +2,7 @@ package http
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"math"
@@ -70,6 +71,24 @@ func resolveMaxBodyBytes(v int64, logger zerolog.Logger) (int, error) {
 	}
 
 	return int(v), nil
+}
+
+// buildPublicTLSConfig loads the operator-supplied certificate/key
+// pair and returns a TLS config pinned to TLS 1.2+ for the public
+// listener. A load failure (missing file, mismatched pair, malformed
+// PEM) is returned to the caller, which fails startup closed — a
+// gateway configured for TLS that cannot present a certificate must
+// not fall back to plaintext.
+func buildPublicTLSConfig(certFile, keyFile string) (*tls.Config, error) {
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return nil, fmt.Errorf("load TLS keypair (cert=%q key=%q): %w", certFile, keyFile, err)
+	}
+
+	return &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS12,
+	}, nil
 }
 
 // withNoDefaultServerHeader disables Hertz's automatic
@@ -150,7 +169,7 @@ func NewServer(
 	// cancels the connection ctx; the standard transport polls the
 	// socket); a future transport override must re-verify the option
 	// still applies.
-	h := server.New(
+	opts := []hertzconfig.Option{
 		server.WithHostPorts(cfg.HTTPAddr),
 		server.WithMaxRequestBodySize(maxBody),
 		server.WithMaxHeaderBytes(cfg.MaxHeaderBytes),
@@ -161,7 +180,24 @@ func NewServer(
 		server.WithKeepAlive(true),
 		server.WithSenseClientDisconnection(true),
 		withNoDefaultServerHeader(),
-	)
+	}
+
+	if cfg.PublicTLSEnabled() {
+		tlsCfg, err := buildPublicTLSConfig(cfg.TLSCertFile, cfg.TLSKeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("http server: %w", err)
+		}
+		// server.WithTLS switches Hertz off its netpoll transport onto
+		// the standard Go-net transport (netpoll does not support TLS),
+		// a measurable hot-path change at high RPS. Log it loud so the
+		// operator knows the throughput profile shifted and can decide
+		// whether mesh/LB termination is the better fit.
+		logger.Warn().
+			Msg("TLS enabled on the public listener: Hertz falls back from netpoll to the standard transport (netpoll has no TLS); prefer terminating TLS at the mesh/LB for maximum throughput")
+		opts = append(opts, server.WithTLS(tlsCfg))
+	}
+
+	h := server.New(opts...)
 
 	// Health endpoints deliberately do NOT register here: probes,
 	// metrics, and every future admin/debug surface live on the

@@ -101,6 +101,20 @@ func BuildOptions(cfg *config.Config, logger zerolog.Logger) []natsgo.Option {
 		opts = append(opts, natsgo.UserInfo(cfg.NATSUser, cfg.NATSPassword.Reveal()))
 	}
 
+	// TLS to the bus. RootCAs verifies the server certificate against a
+	// private CA; ClientCert presents the gateway's own certificate for
+	// mutual TLS. The paths are both-or-neither-validated at config.Load,
+	// so a lone cert or key never reaches here. nats.go validates the
+	// files at connect time, so a bad path fails the (fatal) Connect
+	// rather than being silently ignored.
+	if cfg.NATSTLSCAFile != "" {
+		opts = append(opts, natsgo.RootCAs(cfg.NATSTLSCAFile))
+	}
+
+	if cfg.NATSTLSCertFile != "" {
+		opts = append(opts, natsgo.ClientCert(cfg.NATSTLSCertFile, cfg.NATSTLSKeyFile))
+	}
+
 	return opts
 }
 

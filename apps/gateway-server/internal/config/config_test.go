@@ -686,3 +686,50 @@ func TestLoad_InvalidIPDenyListFailsClosed(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "IP_DENYLIST")
 }
+
+func TestLoad_PublicTLSPairIsBothOrNeither(t *testing.T) {
+	t.Run("cert without key fails closed", func(t *testing.T) {
+		setRequiredEnv(t)
+		t.Setenv("TLS_CERT_FILE", "/tmp/cert.pem")
+
+		_, err := Load()
+		require.Error(t, err)
+		assert.ErrorContains(t, err, "TLS_KEY_FILE")
+	})
+
+	t.Run("key without cert fails closed", func(t *testing.T) {
+		setRequiredEnv(t)
+		t.Setenv("TLS_KEY_FILE", "/tmp/key.pem")
+
+		_, err := Load()
+		require.Error(t, err)
+		assert.ErrorContains(t, err, "TLS_CERT_FILE")
+	})
+
+	t.Run("both set parses and reports enabled", func(t *testing.T) {
+		setRequiredEnv(t)
+		t.Setenv("TLS_CERT_FILE", "/tmp/cert.pem")
+		t.Setenv("TLS_KEY_FILE", "/tmp/key.pem")
+
+		cfg, err := Load()
+		require.NoError(t, err)
+		assert.True(t, cfg.PublicTLSEnabled())
+	})
+
+	t.Run("neither set is plaintext", func(t *testing.T) {
+		setRequiredEnv(t)
+
+		cfg, err := Load()
+		require.NoError(t, err)
+		assert.False(t, cfg.PublicTLSEnabled())
+	})
+}
+
+func TestLoad_NATSTLSClientCertPairIsBothOrNeither(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("NATS_TLS_CERT_FILE", "/tmp/client.pem")
+
+	_, err := Load()
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "NATS_TLS_KEY_FILE")
+}
