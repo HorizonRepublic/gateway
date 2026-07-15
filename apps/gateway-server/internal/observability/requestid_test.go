@@ -27,9 +27,11 @@ func TestNewRequestID_IsUnique(t *testing.T) {
 }
 
 // constByteReader emits an endless stream of one byte value. Seeding
-// a monotonic ULID source from a 0xFF stream pins its 80-bit entropy
-// at the maximum, so the next same-millisecond read overflows
-// deterministically.
+// a monotonic ULID source (with inc=1) from a 0xFF stream pins its
+// 80-bit entropy at the maximum, so the next same-millisecond read
+// increments past the ceiling and overflows deterministically. inc=1
+// is required: inc=0 defaults to MaxUint32, whose rejection-sampling
+// increment loop never terminates on a constant byte stream.
 type constByteReader byte
 
 func (c constByteReader) Read(p []byte) (int, error) {
@@ -48,7 +50,7 @@ func (c constByteReader) Read(p []byte) (int, error) {
 // upgrade that changes overflow semantics fails loudly here instead
 // of silently invalidating the fallback.
 func TestULIDMonotonic_SameMillisecondOverflow_ReturnsError(t *testing.T) {
-	src := ulid.Monotonic(constByteReader(0xFF), 0)
+	src := ulid.Monotonic(constByteReader(0xFF), 1)
 	ms := ulid.Timestamp(time.Now())
 
 	_, err := ulid.New(ms, src)
@@ -65,7 +67,7 @@ func TestULIDMonotonic_SameMillisecondOverflow_ReturnsError(t *testing.T) {
 // (fresh non-monotonic entropy) instead of panicking, and reseeds the
 // source so subsequent calls run monotonic again.
 func TestNewRequestID_MonotonicOverflow_RecoversWithoutPanic(t *testing.T) {
-	poisoned := ulid.Monotonic(constByteReader(0xFF), 0)
+	poisoned := ulid.Monotonic(constByteReader(0xFF), 1)
 
 	requestIDMu.Lock()
 	original := requestIDSource
