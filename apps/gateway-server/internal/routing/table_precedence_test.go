@@ -125,10 +125,14 @@ func TestLookup_PathDeeperThanStackBufferStillMatches(t *testing.T) {
 }
 
 // TestLookup_AllocationProfile pins the hot-path allocation contract
-// documented on Lookup: 0 allocs for a static match and for a miss,
-// exactly 1 alloc (the params map) for a parameterized match. A
-// regression in any of these numbers is a hot-path budget change that
-// must be made deliberately, not slipped in.
+// documented on Lookup: 0 allocs for a static match and for a miss;
+// a parameterized match allocates only the params map. The map costs
+// 2 runtime allocations (map header plus its first bucket group) —
+// unavoidable while the Table interface returns map[string]string —
+// so the pinned number is 2, and any increase means a new allocation
+// source crept onto the hot path. A regression in any of these
+// numbers is a hot-path budget change that must be made deliberately,
+// not slipped in.
 func TestLookup_AllocationProfile(t *testing.T) {
 	table := buildBenchTable(100)
 
@@ -138,7 +142,7 @@ func TestLookup_AllocationProfile(t *testing.T) {
 		allocs float64
 	}{
 		{"static-hit", "/resource50/info", 0},
-		{"param-hit", "/resource51/abc", 1},
+		{"param-hit", "/resource51/abc", 2},
 		{"miss", "/absent/path", 0},
 	}
 

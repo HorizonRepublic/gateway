@@ -175,6 +175,21 @@ func TestAppendEnvelopeJSON_OmitsEmptyTraceparent(t *testing.T) {
 	assert.Contains(t, out, `"remoteAddr":"127.0.0.1"`)
 }
 
+// TestAppendEnvelopeJSON_NilQueryEncodesAsEmptyObject pins the
+// nil-tolerance half of the query wire contract: an envelope whose
+// Query map is nil must still emit `"query":{}` — never `null` and
+// never an absent key. The HTTP adapter returns a nil Query map for
+// requests without a query string, so this shape is what every
+// query-less request rides on.
+func TestAppendEnvelopeJSON_NilQueryEncodesAsEmptyObject(t *testing.T) {
+	env := &GatewayRequest{}
+
+	out := string(appendEnvelopeJSON(nil, env))
+
+	assert.Contains(t, out, `"query":{}`)
+	assert.NotContains(t, out, `"query":null`)
+}
+
 func TestAppendEnvelopeJSON_QueryMultiValueArrayShape(t *testing.T) {
 	env := &GatewayRequest{
 		Query: map[string]QueryValue{

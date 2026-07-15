@@ -140,9 +140,10 @@ func (t *indexedTable) add(route Route) {
 // param-first candidates. The first match wins and is deterministic
 // because candidate lists are precedence-sorted at build time.
 //
-// Allocation profile: 0 allocs for a static-template match or a miss;
-// exactly 1 alloc (the params map) for a parameterized match. Pinned
-// by TestLookup_AllocationProfile.
+// Allocation profile: 0 allocs for a static-template match or a miss.
+// A parameterized match allocates only the params map, which the
+// runtime materialises as 2 allocations (map header plus its first
+// bucket group). Pinned by TestLookup_AllocationProfile.
 func (t *indexedTable) Lookup(method, path string) (Route, map[string]string, bool) {
 	var stack [maxStackPathSegments]string
 	segments := appendPathSegments(stack[:0], path)
