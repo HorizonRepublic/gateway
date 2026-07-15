@@ -188,6 +188,14 @@ func NewServer(
 	limiter := newConcurrencyLimitMiddleware(cfg.HTTPMaxConcurrentRequests)
 	h.Use(limiter.handler)
 	h.Use(newTrustedProxyMiddleware(cfg.TrustedProxies, cfg.TrustedProxyHeader))
+
+	// IP filter runs directly after trust resolution so it sees the
+	// genuine client, and only when a policy is configured so the
+	// default hot path carries no extra middleware.
+	if len(cfg.IPAllowList) > 0 || len(cfg.IPDenyList) > 0 {
+		h.Use(newIPFilterMiddleware(cfg.IPAllowList, cfg.IPDenyList))
+	}
+
 	h.Any("/*path", NewHertzAdapter(handler))
 
 	return h, nil

@@ -657,3 +657,32 @@ func TestLoad_AccessLogCanBeDisabled(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, cfg.AccessLogEnabled)
 }
+
+func TestLoad_ParsesIPFilterLists(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("IP_DENYLIST", "10.0.0.0/8,192.168.1.5/32")
+	t.Setenv("IP_ALLOWLIST", "203.0.113.0/24")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Len(t, cfg.IPDenyList, 2)
+	assert.Len(t, cfg.IPAllowList, 1)
+}
+
+func TestLoad_EmptyIPFilterListsAreNil(t *testing.T) {
+	setRequiredEnv(t)
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Empty(t, cfg.IPDenyList)
+	assert.Empty(t, cfg.IPAllowList)
+}
+
+func TestLoad_InvalidIPDenyListFailsClosed(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("IP_DENYLIST", "10.0.0.0/8,not-a-cidr")
+
+	_, err := Load()
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "IP_DENYLIST")
+}
