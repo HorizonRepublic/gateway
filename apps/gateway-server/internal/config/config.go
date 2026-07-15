@@ -73,18 +73,20 @@ type Config struct {
 	// WriteTimeout bounds how long the server will take to write the
 	// full response back to the client before forcibly closing.
 	//
-	// INVARIANT: WriteTimeout MUST be strictly greater than
-	// RequestTimeout. When a request hits the RequestTimeout deadline
-	// the handler writes a 504 response; if the underlying HTTP write
-	// deadline has already expired, the 504 is truncated or dropped on
-	// the wire. Operators should keep several seconds of slack between
-	// the two (the defaults are 35s vs 30s).
+	// INVARIANT (enforced at Load): WriteTimeout MUST be strictly
+	// greater than RequestTimeout. When a request hits the
+	// RequestTimeout deadline the handler writes a 504 response; if
+	// the underlying HTTP write deadline has already expired, the 504
+	// is truncated or dropped on the wire. Operators should keep
+	// several seconds of slack between the two (the defaults are 35s
+	// vs 30s).
 	WriteTimeout time.Duration `env:"HTTP_WRITE_TIMEOUT" envDefault:"35s"`
 	// IdleTimeout bounds how long a keep-alive connection may sit
 	// between requests before the server closes it.
 	IdleTimeout time.Duration `env:"HTTP_IDLE_TIMEOUT"  envDefault:"120s"`
 	// MaxBodyBytes is the maximum accepted request body size in bytes.
 	// Requests exceeding this are rejected with 413 Content Too Large.
+	// Zero disables the cap; negative values are rejected at Load().
 	//
 	// The default is 960 KiB — deliberately BELOW the NATS server's
 	// default max_payload (1 MiB) — because the gateway forwards the
@@ -97,7 +99,9 @@ type Config struct {
 	// together with the NATS server's max_payload.
 	MaxBodyBytes int64 `env:"HTTP_MAX_BODY_BYTES"   envDefault:"983040"`
 	// MaxHeaderBytes is the maximum accepted request header size in
-	// bytes, summed across all headers.
+	// bytes, summed across all headers. Must be > 0 — the HTTP layer
+	// treats a non-positive value as "no header cap", which removes
+	// the oversized-header defence, so Load() rejects it.
 	MaxHeaderBytes int `env:"HTTP_MAX_HEADER_BYTES" envDefault:"16384"`
 
 	// HTTPMaxConcurrentRequests caps the number of HTTP requests
@@ -195,6 +199,12 @@ type Config struct {
 	// traffic — in Kubernetes this port stays off the public
 	// Service/Ingress, so every operator endpoint is private by
 	// construction.
+	//
+	// Load() compares this against HTTPAddr after host:port
+	// normalisation (":8080", "0.0.0.0:8080", and "[::]:8080" all
+	// denote the same wildcard socket) and rejects collisions, so a
+	// differently-spelled duplicate cannot reach the runtime bind
+	// race.
 	OperatorHTTPAddr string `env:"OPERATOR_HTTP_ADDR" envDefault:":8081"`
 
 	// NATSMaxInflight caps concurrent in-flight NATS requests across
@@ -263,6 +273,12 @@ type Config struct {
 	RequestTimeout time.Duration `env:"REQUEST_TIMEOUT"  envDefault:"30s"`
 	// ShutdownTimeout bounds how long the graceful-shutdown sequence
 	// waits for in-flight requests to finish before force-closing.
+	//
+	// Must be > 0; there is no "unlimited" sentinel. A non-positive
+	// value would make the drain context born-expired, so SIGTERM
+	// would force-drop every in-flight request instead of draining —
+	// the exact opposite of what "0 = no limit" suggests. Load()
+	// rejects it.
 	ShutdownTimeout time.Duration `env:"SHUTDOWN_TIMEOUT" envDefault:"30s"`
 
 	// RateLimitFailPolicy selects behavior when the distributed
@@ -440,8 +456,16 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("HTTP_MAX_CONCURRENT_REQUESTS must be ≥ 0 (0 disables the cap), got %d", cfg.HTTPMaxConcurrentRequests)
 	}
 
-	if cfg.OperatorHTTPAddr == "" || cfg.OperatorHTTPAddr == cfg.HTTPAddr {
-		return nil, fmt.Errorf("OPERATOR_HTTP_ADDR must be non-empty and differ from HTTP_ADDR (operator surfaces never share the public socket), got %q", cfg.OperatorHTTPAddr)
+	if err := validateHTTPLimits(cfg); err != nil {
+		return nil, err
+	}
+
+	if err := validateListenSockets(cfg); err != nil {
+		return nil, err
+	}
+
+	if cfg.NATSReconnectWait <= 0 {
+		return nil, fmt.Errorf("NATS_RECONNECT_WAIT must be > 0, got %s", cfg.NATSReconnectWait)
 	}
 
 	if cfg.NATSMaxInflight < 0 {
@@ -452,25 +476,173 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("NATS_INFLIGHT_QUEUE_TIMEOUT must be > 0 and ≤ 10s, got %s", cfg.NATSInflightQueueTimeout)
 	}
 
-	if cfg.CircuitBreakerEnabled {
-		if cfg.CircuitBreakerFailureThreshold < 1 {
-			return nil, fmt.Errorf("CIRCUIT_BREAKER_FAILURE_THRESHOLD must be ≥ 1, got %d", cfg.CircuitBreakerFailureThreshold)
-		}
-
-		if cfg.CircuitBreakerRecoveryTimeout <= 0 {
-			return nil, fmt.Errorf("CIRCUIT_BREAKER_RECOVERY_TIMEOUT must be > 0, got %s", cfg.CircuitBreakerRecoveryTimeout)
-		}
-
-		if cfg.CircuitBreakerHalfOpenProbes < 1 {
-			return nil, fmt.Errorf("CIRCUIT_BREAKER_HALF_OPEN_PROBES must be ≥ 1, got %d", cfg.CircuitBreakerHalfOpenProbes)
-		}
-
-		if cfg.CircuitBreakerMaxSubjects < 1 {
-			return nil, fmt.Errorf("CIRCUIT_BREAKER_MAX_SUBJECTS must be ≥ 1, got %d", cfg.CircuitBreakerMaxSubjects)
-		}
+	if err := validateCircuitBreaker(cfg); err != nil {
+		return nil, err
 	}
 
 	return cfg, nil
+}
+
+// validateHTTPLimits rejects zero/negative values for the core HTTP
+// and request duration/size knobs, and enforces the WriteTimeout >
+// RequestTimeout invariant documented on Config.WriteTimeout. None of
+// these knobs has a safe non-positive interpretation at runtime, so
+// startup aborts instead of shipping an instantly-expired deadline or
+// an uncapped header path into traffic.
+func validateHTTPLimits(cfg *Config) error {
+	if cfg.ReadTimeout <= 0 {
+		return fmt.Errorf("HTTP_READ_TIMEOUT must be > 0, got %s", cfg.ReadTimeout)
+	}
+
+	if cfg.WriteTimeout <= 0 {
+		return fmt.Errorf("HTTP_WRITE_TIMEOUT must be > 0, got %s", cfg.WriteTimeout)
+	}
+
+	if cfg.IdleTimeout <= 0 {
+		return fmt.Errorf("HTTP_IDLE_TIMEOUT must be > 0, got %s", cfg.IdleTimeout)
+	}
+
+	if cfg.RequestTimeout <= 0 {
+		return fmt.Errorf("REQUEST_TIMEOUT must be > 0, got %s", cfg.RequestTimeout)
+	}
+
+	if cfg.WriteTimeout <= cfg.RequestTimeout {
+		return fmt.Errorf("HTTP_WRITE_TIMEOUT (%s) must be strictly greater than REQUEST_TIMEOUT (%s) — the 504 written at the request deadline must still fit inside the HTTP write deadline", cfg.WriteTimeout, cfg.RequestTimeout)
+	}
+
+	if cfg.ShutdownTimeout <= 0 {
+		return fmt.Errorf("SHUTDOWN_TIMEOUT must be > 0 (there is no \"unlimited\" sentinel — a non-positive value pre-expires the drain context and force-drops in-flight requests), got %s", cfg.ShutdownTimeout)
+	}
+
+	if cfg.MaxBodyBytes < 0 {
+		return fmt.Errorf("HTTP_MAX_BODY_BYTES must be ≥ 0 (0 disables the cap), got %d", cfg.MaxBodyBytes)
+	}
+
+	if cfg.MaxHeaderBytes <= 0 {
+		return fmt.Errorf("HTTP_MAX_HEADER_BYTES must be > 0 (non-positive values disable the header cap entirely), got %d", cfg.MaxHeaderBytes)
+	}
+
+	return nil
+}
+
+// validateListenSockets rejects listen-address configurations that
+// would race for one socket at runtime: both addresses are normalised
+// to host:port form and compared, so differently-spelled duplicates
+// (":8080" vs "0.0.0.0:8080") fail here instead of losing a bind race
+// inside a server goroutine whose error is only logged.
+func validateListenSockets(cfg *Config) error {
+	if cfg.OperatorHTTPAddr == "" {
+		return fmt.Errorf("OPERATOR_HTTP_ADDR must be non-empty (operator surfaces never share the public socket)")
+	}
+
+	publicAddr, err := parseListenAddr("HTTP_ADDR", cfg.HTTPAddr)
+	if err != nil {
+		return err
+	}
+
+	operatorAddr, err := parseListenAddr("OPERATOR_HTTP_ADDR", cfg.OperatorHTTPAddr)
+	if err != nil {
+		return err
+	}
+
+	if publicAddr.collidesWith(operatorAddr) {
+		return fmt.Errorf("OPERATOR_HTTP_ADDR=%q binds the same socket as HTTP_ADDR=%q (operator surfaces never share the public socket)", cfg.OperatorHTTPAddr, cfg.HTTPAddr)
+	}
+
+	return nil
+}
+
+// validateCircuitBreaker checks the breaker knobs only when the
+// breaker is enabled — a disabled breaker never reads them, and
+// rejecting unused values would turn a dormant misconfiguration into
+// a startup failure.
+func validateCircuitBreaker(cfg *Config) error {
+	if !cfg.CircuitBreakerEnabled {
+		return nil
+	}
+
+	if cfg.CircuitBreakerFailureThreshold < 1 {
+		return fmt.Errorf("CIRCUIT_BREAKER_FAILURE_THRESHOLD must be ≥ 1, got %d", cfg.CircuitBreakerFailureThreshold)
+	}
+
+	if cfg.CircuitBreakerRecoveryTimeout <= 0 {
+		return fmt.Errorf("CIRCUIT_BREAKER_RECOVERY_TIMEOUT must be > 0, got %s", cfg.CircuitBreakerRecoveryTimeout)
+	}
+
+	if cfg.CircuitBreakerHalfOpenProbes < 1 {
+		return fmt.Errorf("CIRCUIT_BREAKER_HALF_OPEN_PROBES must be ≥ 1, got %d", cfg.CircuitBreakerHalfOpenProbes)
+	}
+
+	if cfg.CircuitBreakerMaxSubjects < 1 {
+		return fmt.Errorf("CIRCUIT_BREAKER_MAX_SUBJECTS must be ≥ 1, got %d", cfg.CircuitBreakerMaxSubjects)
+	}
+
+	return nil
+}
+
+// listenAddr is the normalised form of a host:port listen address used
+// for socket-collision comparison at Load() time.
+type listenAddr struct {
+	// host is the canonical IP string (via net.IP.String()) or the
+	// lowercased hostname. Empty when wildcard is set.
+	host string
+	// wildcard marks all-interfaces binds: an empty host (":8080"),
+	// 0.0.0.0, or ::. All wildcard spellings are treated as one
+	// socket per port — the kernel refuses the second bind anyway.
+	wildcard bool
+	// port is the resolved numeric TCP port.
+	port int
+}
+
+// collidesWith reports whether binding both addresses would race for
+// the same socket: same port, and either side binds all interfaces or
+// both name the same host. Hostnames are compared textually (no DNS
+// resolution at validation time), so "localhost" vs "127.0.0.1" passes
+// here and surfaces at bind time instead.
+func (a listenAddr) collidesWith(b listenAddr) bool {
+	if a.port != b.port {
+		return false
+	}
+
+	return a.wildcard || b.wildcard || a.host == b.host
+}
+
+// parseListenAddr normalises a listen address for collision
+// comparison. Fail-closed: an address net.Listen could not parse
+// aborts startup here, with an error naming the env var, instead of
+// dying later inside a server goroutine whose error is only logged.
+func parseListenAddr(envName, addr string) (listenAddr, error) {
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		return listenAddr{}, fmt.Errorf("%s=%q is not a valid host:port listen address: %w", envName, addr, err)
+	}
+
+	port, err := net.LookupPort("tcp", portStr)
+	if err != nil {
+		return listenAddr{}, fmt.Errorf("%s=%q has an invalid port %q: %w", envName, addr, portStr, err)
+	}
+
+	out := listenAddr{port: port}
+
+	if host == "" {
+		out.wildcard = true
+
+		return out, nil
+	}
+
+	if ip := net.ParseIP(host); ip != nil {
+		if ip.IsUnspecified() {
+			out.wildcard = true
+		} else {
+			out.host = ip.String()
+		}
+
+		return out, nil
+	}
+
+	out.host = strings.ToLower(host)
+
+	return out, nil
 }
 
 // IsProduction reports whether the gateway is running with Environment

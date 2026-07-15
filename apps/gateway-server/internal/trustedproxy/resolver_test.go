@@ -158,7 +158,29 @@ func TestResolveClientIP_IPv4MappedIPv6_PeerTrusted_ReturnsClient(t *testing.T) 
 		"IPv4-mapped IPv6 peer must normalise to IPv4 for CIDR match")
 }
 
-func TestResolveClientIP_MalformedXFFEntry_Skipped(t *testing.T) {
+// TestResolveClientIP_MalformedEntry_TerminatesWalkToPeer pins the
+// fail-closed walk contract: an entry the resolver cannot parse marks
+// the boundary of trustworthy data. Everything further left was
+// written by less-trusted parties, so the walk MUST stop and fall
+// back to the peer instead of continuing into attacker-controlled
+// territory. Skipping the malformed hop here would hand the
+// attacker-prepended 6.6.6.6 to rate limiting and audit logs.
+func TestResolveClientIP_MalformedEntry_TerminatesWalkToPeer(t *testing.T) {
+	trusted := resolverFixture(t)
+	got := trustedproxy.ResolveClientIP(
+		net.ParseIP("10.0.0.1"),
+		"6.6.6.6, garbage",
+		trusted,
+	)
+	assert.Equal(t, "10.0.0.1", got,
+		"unparseable hop terminates the walk fail-closed — entries left of it are never consulted")
+}
+
+// TestResolveClientIP_MalformedEntryLeftOfUntrusted_NotReached pins
+// that the fail-closed termination does not regress the happy path:
+// the walk returns at the rightmost untrusted entry before ever
+// touching a malformed hop further left.
+func TestResolveClientIP_MalformedEntryLeftOfUntrusted_NotReached(t *testing.T) {
 	trusted := resolverFixture(t)
 	got := trustedproxy.ResolveClientIP(
 		net.ParseIP("10.0.0.1"),
@@ -166,7 +188,93 @@ func TestResolveClientIP_MalformedXFFEntry_Skipped(t *testing.T) {
 		trusted,
 	)
 	assert.Equal(t, "1.2.3.4", got,
-		"malformed entries in XFF must be skipped, resolver continues walking")
+		"walk resolves at the rightmost untrusted entry; hops left of it are irrelevant")
+}
+
+// TestResolveClientIP_PortSuffixedEntry_ParsesHost pins the ip:port
+// entry form. Some trusted L7 proxies (Azure Application Gateway,
+// IIS/ARR) record the peer socket rather than the bare address, so
+// "203.0.113.9:51234" is a legitimate genuine-client entry. Treating
+// it as malformed would terminate the walk and collapse every client
+// behind that proxy onto the proxy's identity.
+func TestResolveClientIP_PortSuffixedEntry_ParsesHost(t *testing.T) {
+	trusted := resolverFixture(t)
+	got := trustedproxy.ResolveClientIP(
+		net.ParseIP("10.0.0.1"),
+		"6.6.6.6, 203.0.113.9:51234",
+		trusted,
+	)
+	assert.Equal(t, "203.0.113.9", got,
+		"ip:port entry parses to its host — attacker-prepended 6.6.6.6 is never reached")
+}
+
+// TestResolveClientIP_PortSuffixedTrustedEntry_SkippedAsTrusted pins
+// that port-suffixed entries participate in trust matching like bare
+// ones: a trusted ip:port hop is skipped and the walk continues left.
+func TestResolveClientIP_PortSuffixedTrustedEntry_SkippedAsTrusted(t *testing.T) {
+	trusted := resolverFixture(t)
+	got := trustedproxy.ResolveClientIP(
+		net.ParseIP("10.0.0.1"),
+		"1.2.3.4, 10.0.0.5:443",
+		trusted,
+	)
+	assert.Equal(t, "1.2.3.4", got,
+		"trusted ip:port hop is skipped exactly like a bare trusted IP")
+}
+
+// TestResolveClientIP_BracketedIPv6WithPort_ParsesHost pins the
+// RFC 7239 §6 node form for IPv6: "[2001:db8::1]:443" resolves to
+// the bracketed host.
+func TestResolveClientIP_BracketedIPv6WithPort_ParsesHost(t *testing.T) {
+	trusted := resolverFixture(t)
+	got := trustedproxy.ResolveClientIP(
+		net.ParseIP("::1"),
+		"[2001:db8::1]:443",
+		trusted,
+	)
+	assert.Equal(t, "2001:db8::1", got,
+		"bracketed IPv6 with port parses to the enclosed address")
+}
+
+// TestResolveClientIP_BracketedIPv6WithoutPort_Parses covers the
+// bracket-only variant some forwarders emit for IPv6 entries.
+func TestResolveClientIP_BracketedIPv6WithoutPort_Parses(t *testing.T) {
+	trusted := resolverFixture(t)
+	got := trustedproxy.ResolveClientIP(
+		net.ParseIP("::1"),
+		"[2001:db8::1]",
+		trusted,
+	)
+	assert.Equal(t, "2001:db8::1", got,
+		"bracketed IPv6 without port parses to the enclosed address")
+}
+
+// TestResolveClientIP_RFC7239UnknownIdentifier_TerminatesWalk pins
+// fail-closed handling of the RFC 7239 §6 "unknown" identifier: it
+// carries no IP, so the walk cannot continue past it safely.
+func TestResolveClientIP_RFC7239UnknownIdentifier_TerminatesWalk(t *testing.T) {
+	trusted := resolverFixture(t)
+	got := trustedproxy.ResolveClientIP(
+		net.ParseIP("10.0.0.1"),
+		"6.6.6.6, unknown",
+		trusted,
+	)
+	assert.Equal(t, "10.0.0.1", got,
+		"RFC 7239 \"unknown\" identifier terminates the walk to the peer")
+}
+
+// TestResolveClientIP_ObfuscatedIdentifier_TerminatesWalk pins the
+// same fail-closed handling for RFC 7239 §6.3 obfuscated identifiers
+// ("_hidden") — non-IP node forms never extend the walk.
+func TestResolveClientIP_ObfuscatedIdentifier_TerminatesWalk(t *testing.T) {
+	trusted := resolverFixture(t)
+	got := trustedproxy.ResolveClientIP(
+		net.ParseIP("10.0.0.1"),
+		"6.6.6.6, _hidden",
+		trusted,
+	)
+	assert.Equal(t, "10.0.0.1", got,
+		"obfuscated identifier terminates the walk to the peer")
 }
 
 func TestResolveClientIP_WhitespaceAndEmptyEntries_Tolerated(t *testing.T) {
