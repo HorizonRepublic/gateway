@@ -12,15 +12,24 @@ export interface IGatewayCorsConfig {
   /**
    * Allowed HTTP methods for preflight.
    * @remarks
-   * Default: the route's own method plus all other methods registered on
-   * the same path (resolved by the Go side at table build time).
+   * When omitted, the gateway answers each preflight with the request's
+   * own validated `Access-Control-Request-Method` — the preflight route
+   * lookup has already proved that method exists on the path, so the
+   * browser always sees the method it asked for. Provide an explicit
+   * list only to advertise additional methods in a single preflight
+   * answer.
    */
   readonly methods?: readonly string[];
 
   /**
    * Allowed request headers for preflight.
    * @remarks
-   * Default: `['Content-Type', 'Authorization', 'X-Request-Id']`.
+   * Default: `['Content-Type', 'Authorization', 'X-Request-Id']`,
+   * materialized into the registry entry at metadata-normalization time —
+   * the Go side adds no implicit `Access-Control-Allow-Headers` values,
+   * so the wire contract stays self-describing. An explicit list
+   * replaces the default entirely; an explicit `[]` opts out of
+   * `Access-Control-Allow-Headers` altogether.
    */
   readonly headers?: readonly string[];
 

@@ -18,6 +18,29 @@ func TestHashKey_FixedLengthAndDeterministic(t *testing.T) {
 	assert.Regexp(t, `^[a-z2-7]{13}$`, a1)
 }
 
+// TestBuildBucketKey_MatchesUncachedComposition pins the memoized
+// fast path against the canonical schema: the cached pathTemplate
+// digest and the buffer-composed output MUST be byte-identical to the
+// naive method + "." + hashKey(template) + "." + hashKey(resolved)
+// composition, across repeated calls and distinct templates. Bucket
+// identity is a cross-backend migration contract — a drifted key
+// silently splits a client's GCRA state.
+func TestBuildBucketKey_MatchesUncachedComposition(t *testing.T) {
+	cases := []struct{ method, template, resolved string }{
+		{"GET", "/users/:id", "203.0.113.7"},
+		{"GET", "/users/:id", "203.0.113.8"},
+		{"POST", "/users/:id", "203.0.113.7"},
+		{"GET", "/orders/:id/items", "user-42"},
+	}
+	for _, tc := range cases {
+		want := tc.method + "." + hashKey(tc.template) + "." + hashKey(tc.resolved)
+		for i := 0; i < 3; i++ {
+			assert.Equalf(t, want, BuildBucketKey(tc.method, tc.template, tc.resolved),
+				"call %d for (%s %s %s)", i+1, tc.method, tc.template, tc.resolved)
+		}
+	}
+}
+
 // TestStringifyClaim_JSONMarshalErrorFallsBackDeterministically pins
 // the lossy-fallback path for claim shapes json.Marshal rejects (func,
 // chan, complex). Every iteration MUST produce the exact same string —

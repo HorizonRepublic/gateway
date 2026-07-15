@@ -1784,6 +1784,8 @@ func TestExtractCookie_TrimsWhitespaceAndQuotes(t *testing.T) {
 		{"quoted value among siblings", `theme=dark; session="abc"; lang=en`, "abc"},
 		{"single trailing quote stays attached", `session=abc"`, `abc"`},
 		{"single leading quote stays attached", `session="abc`, `"abc`},
+		{"whitespace before equals in name", "session =abc", "abc"},
+		{"nameless flag pair skipped, later real pair wins", "session; session=abc", "abc"},
 	}
 
 	for _, c := range cases {
@@ -1805,6 +1807,30 @@ func TestExtractCookie_MissingCookieReturnsEmpty(t *testing.T) {
 	got, collided = extractCookie(map[string]string{"cookie": "theme=dark"}, "session")
 	assert.Equal(t, "", got)
 	assert.False(t, collided)
+}
+
+// TestExtractCookie_SkipsNamelessPairs pins RFC 6265bis §5.6 semantics
+// for degenerate cookie pairs: a pair without "=" (or with nothing
+// before it) parses as a NAMELESS cookie — empty name carrying the
+// whole string as value — which can never match a named lookup. The
+// SDK's parseCookies skips these pairs identically; the mirrored
+// table lives in the SDK cookie-parser spec. Keep both in sync.
+func TestExtractCookie_SkipsNamelessPairs(t *testing.T) {
+	cases := []struct {
+		name   string
+		header string
+	}{
+		{"bare flag pair resolves to no cookie", "session"},
+		{"empty-name pair resolves to no cookie", "=abc"},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, collided := extractCookie(map[string]string{"cookie": c.header}, "session")
+			assert.Equal(t, "", got)
+			assert.False(t, collided)
+		})
+	}
 }
 
 // TestExtractCookie_DuplicateNameSignalsCollision pins the safety
