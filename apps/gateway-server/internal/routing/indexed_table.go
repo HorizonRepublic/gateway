@@ -178,6 +178,28 @@ func (t *indexedTable) Methods(path string) []string {
 	return methods
 }
 
+// Routes returns a deterministically ordered copy of the table's
+// routes for the operator admin surface. The copy protects the
+// immutable build snapshot from an accidental caller mutation; the
+// ordering (method, then template, then subject) makes the dump
+// stable across pods and scrapes so operators can diff it.
+func (t *indexedTable) Routes() []Route {
+	out := make([]Route, len(t.routes))
+	copy(out, t.routes)
+	slices.SortFunc(out, func(a, b Route) int {
+		if c := strings.Compare(a.Method, b.Method); c != 0 {
+			return c
+		}
+		if c := strings.Compare(a.PathTemplate, b.PathTemplate); c != 0 {
+			return c
+		}
+
+		return strings.Compare(a.Subject, b.Subject)
+	})
+
+	return out
+}
+
 // compileRoute pre-splits a route's path template into
 // templateSegments and counts its parameters. Runs once per route at
 // table-build time; the result is immutable alongside the table.

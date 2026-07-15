@@ -36,6 +36,8 @@ func (t operatorTable) Lookup(method, path string) (routing.Route, map[string]st
 
 func (operatorTable) Methods(string) []string { return nil }
 
+func (t operatorTable) Routes() []routing.Route { return []routing.Route{t.route} }
+
 // operatorFakeNats replies with a canned success envelope for every
 // subject — enough to complete the proxy round trip that feeds the
 // RED metrics.
@@ -51,7 +53,7 @@ func startOperator(t *testing.T, metrics *observability.Metrics) (string, func()
 	t.Helper()
 
 	cfg := &config.Config{OperatorHTTPAddr: "127.0.0.1:0"}
-	srv := NewOperatorServer(cfg, ReadinessFunc(func() bool { return true }), metrics.Handler())
+	srv := NewOperatorServer(cfg, ReadinessFunc(func() bool { return true }), metrics.Handler(), nil)
 
 	runErr := make(chan error, 1)
 	go func() { runErr <- srv.Run() }()

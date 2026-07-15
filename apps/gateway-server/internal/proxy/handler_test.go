@@ -44,6 +44,8 @@ func (f *fakeTable) Lookup(method, path string) (routing.Route, map[string]strin
 
 func (f *fakeTable) Methods(_ string) []string { return nil }
 
+func (f *fakeTable) Routes() []routing.Route { return nil }
+
 // recordedCall captures a single NATS request issued by the handler
 // under test. Tests assert on .subject to verify call ordering, on
 // .payload to inspect the encoded envelope, on .timeout to verify
