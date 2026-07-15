@@ -4,11 +4,22 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 )
+
+// tombstoneNs is the lastSeen sentinel a sweeper stamps on an entry it
+// has claimed for deletion. The claim is a CompareAndSwap from the
+// stale timestamp the sweeper observed, so a concurrent Allow that
+// refreshes lastSeen first wins the race and keeps the entry alive.
+// Once tombstoned, an entry is dead: Allow never writes into it and
+// instead removes the corpse and creates a fresh entry. UnixNano can
+// never produce this value (math.MinInt64 is ~292 years before the
+// epoch, outside time.Time's representable Unix-nanosecond range).
+const tombstoneNs = math.MinInt64
 
 // ErrMemoryStoreSaturated is returned by MemoryStore.Allow when the
 // store has reached its configured cardinality cap and refuses to
@@ -35,11 +46,12 @@ type MemoryStore struct {
 	entries sync.Map // map[string]*memoryEntry
 	// entriesSize tracks the live-entry cardinality so Allow can
 	// short-circuit on saturation without walking the whole map. The
-	// counter is incremented on a successful LoadOrStore that creates
-	// a new entry, and decremented by the sweeper when an idle entry
-	// is reaped. Drift from the actual map size is bounded by the
-	// sweeper cadence and is acceptable — the cap is a soft ceiling,
-	// not a hard quota.
+	// counter is incremented when an insert creates a new entry and
+	// decremented by whichever party's pointer-guarded CompareAndDelete
+	// removes one (the sweeper, or an Allow helping a claimed corpse
+	// out of the map). Drift from the actual map size is bounded by
+	// the sweeper cadence and is acceptable — the cap is a soft
+	// ceiling, not a hard quota.
 	entriesSize atomic.Int64
 	// maxEntries caps the number of live entries the store admits.
 	// Zero means "unbounded" (legacy behaviour) so callers that build
@@ -99,7 +111,18 @@ func NewMemoryStore(ttl time.Duration) *MemoryStore {
 // observed worst case at 64-byte keys + 64-byte memoryEntry is
 // roughly 122 MiB per million entries (128 MB decimal), fits comfortably
 // inside a typical pod budget.
+//
+// ttl MUST be > 0; the constructor panics otherwise, mirroring
+// time.NewTicker's contract for non-positive durations. A non-positive
+// TTL would place the sweep cutoff at or beyond "now" and reap every
+// bucket on every tick — a silent fail-open where each key regains its
+// full burst each second. Config validation rejects
+// RATELIMIT_KEY_TTL <= 0 at startup; the panic is the in-package
+// backstop for programmatic misuse.
 func NewMemoryStoreWithCap(ttl time.Duration, maxEntries int64) *MemoryStore {
+	if ttl <= 0 {
+		panic("ratelimit: MemoryStore ttl must be > 0")
+	}
 	s := &MemoryStore{ttl: ttl, maxEntries: maxEntries, stop: make(chan struct{})}
 	go s.sweep()
 	return s
@@ -107,11 +130,12 @@ func NewMemoryStoreWithCap(ttl time.Duration, maxEntries int64) *MemoryStore {
 
 // Allow implements Store by running GCRA against an in-memory TAT.
 //
-// The atomic CAS loop is the hot path: LoadOrStore the entry, load
-// the current TAT, compute the decision via Check, and either
-// return (rejection path) or CAS the new TAT into place. A lost
-// CAS means another goroutine advanced the TAT for the same key —
-// retry so the late arrival sees the updated state.
+// The atomic CAS loop is the hot path: acquire the live entry (a
+// lock-free Load plus a lastSeen CAS; allocation only on a key's
+// first sight), load the current TAT, compute the decision via
+// Check, and either return (rejection path) or CAS the new TAT into
+// place. A lost CAS means another goroutine advanced the TAT for the
+// same key — retry so the late arrival sees the updated state.
 //
 // ctx is consulted at the top of the loop so a cancelled or
 // deadline-exceeded request surfaces ctx.Err() rather than producing
@@ -131,28 +155,11 @@ func (s *MemoryStore) Allow(ctx context.Context, key string, rps, burst int) (De
 
 	now := time.Now()
 
-	// Cardinality-cap fast path: if this is a brand-new key AND the
-	// store is already at capacity, refuse without growing the map.
-	// We probe with Load first to avoid the LoadOrStore allocation
-	// when the map is saturated and the key is not present. Existing
-	// keys (Load hit) bypass the cap regardless of size — keeping a
-	// known bucket usable is more important than enforcing a
-	// post-hoc cap.
-	if s.maxEntries > 0 {
-		if _, ok := s.entries.Load(key); !ok {
-			if s.entriesSize.Load() >= s.maxEntries {
-				s.counters.saturated.Add(1)
-				return Decision{}, ErrMemoryStoreSaturated
-			}
-		}
+	e, err := s.acquireEntry(key, now.UnixNano())
+	if err != nil {
+		s.counters.saturated.Add(1)
+		return Decision{}, err
 	}
-
-	v, loaded := s.entries.LoadOrStore(key, &memoryEntry{})
-	if !loaded {
-		s.entriesSize.Add(1)
-	}
-	e := v.(*memoryEntry)
-	e.lastSeen.Store(now.UnixNano())
 
 	for {
 		if err := ctx.Err(); err != nil {
@@ -172,6 +179,83 @@ func (s *MemoryStore) Allow(ctx context.Context, key string, rps, burst int) (De
 			return decision, nil
 		}
 		// CAS failed (another goroutine won); retry.
+	}
+}
+
+// acquireEntry returns a live *memoryEntry for key with lastSeen
+// refreshed to nowNs, creating one when absent. Allocation happens
+// only on first sight of a key — the hit path is a lock-free Load
+// plus a lastSeen CAS.
+//
+// The tombstone handshake with the sweeper guarantees the returned
+// entry is the key's only live incarnation: an entry the sweeper has
+// claimed (lastSeen == tombstoneNs) is never returned. Instead the
+// corpse is removed — helping the sweeper along so the loop cannot
+// spin against a claimed-but-not-yet-deleted entry — and the retry
+// creates a fresh entry. Both removal sites use the pointer-guarded
+// CompareAndDelete, so exactly one party decrements entriesSize.
+//
+// Returns ErrMemoryStoreSaturated when the key is new and the store
+// is at its cardinality cap. Existing keys bypass the cap — keeping a
+// known bucket usable is more important than enforcing a post-hoc cap.
+func (s *MemoryStore) acquireEntry(key string, nowNs int64) (*memoryEntry, error) {
+	for {
+		if v, ok := s.entries.Load(key); ok {
+			e := v.(*memoryEntry)
+			if touchEntry(e, nowNs) {
+				return e, nil
+			}
+			if s.entries.CompareAndDelete(key, v) {
+				s.entriesSize.Add(-1)
+			}
+			continue
+		}
+
+		if s.maxEntries > 0 && s.entriesSize.Load() >= s.maxEntries {
+			return nil, ErrMemoryStoreSaturated
+		}
+
+		fresh := &memoryEntry{}
+		// Stamp lastSeen before publication so no other goroutine can
+		// ever observe the zero value (which a sweeping Range would
+		// treat as ancient and instantly claim).
+		fresh.lastSeen.Store(nowNs)
+		v, loaded := s.entries.LoadOrStore(key, fresh)
+		if !loaded {
+			s.entriesSize.Add(1)
+			return fresh, nil
+		}
+
+		// Lost the insert race to a concurrent Allow; adopt the
+		// winner's entry through the same tombstone-aware touch.
+		e := v.(*memoryEntry)
+		if touchEntry(e, nowNs) {
+			return e, nil
+		}
+		if s.entries.CompareAndDelete(key, v) {
+			s.entriesSize.Add(-1)
+		}
+	}
+}
+
+// touchEntry refreshes e.lastSeen to nowNs unless the sweeper has
+// tombstoned the entry. Reports whether the entry is live. The CAS
+// (rather than a plain Store) is what closes the lost-update race:
+// the sweeper's claim is also a CAS from the timestamp it observed,
+// so exactly one of the two transitions wins and the loser observes
+// the winner's value.
+func touchEntry(e *memoryEntry, nowNs int64) bool {
+	for {
+		last := e.lastSeen.Load()
+		if last == tombstoneNs {
+			return false
+		}
+		if last >= nowNs {
+			return true
+		}
+		if e.lastSeen.CompareAndSwap(last, nowNs) {
+			return true
+		}
 	}
 }
 
@@ -233,15 +317,41 @@ func (s *MemoryStore) sweep() {
 		case <-s.stop:
 			return
 		case now := <-t.C:
-			cutoff := now.Add(-s.ttl).UnixNano()
-			s.entries.Range(func(k, v any) bool {
-				if e, ok := v.(*memoryEntry); ok && e.lastSeen.Load() < cutoff {
-					if _, deleted := s.entries.LoadAndDelete(k); deleted {
-						s.entriesSize.Add(-1)
-					}
-				}
-				return true
-			})
+			s.sweepOnce(now.Add(-s.ttl).UnixNano())
 		}
 	}
+}
+
+// sweepOnce reaps every entry idle since before cutoffNs. Extracted
+// from the ticker loop so tests can drive sweeps deterministically.
+//
+// Reaping is a two-phase handshake with Allow rather than a bare
+// delete: first claim the entry by CAS-ing lastSeen from the observed
+// stale timestamp to the tombstone, then remove it with a
+// pointer-guarded CompareAndDelete. A concurrent Allow that refreshes
+// lastSeen between the Range read and the claim makes the CAS fail and
+// the entry survives — its in-flight TAT write cannot be orphaned. The
+// pointer guard on the delete protects the other direction: if a
+// racing Allow already removed the corpse and installed a fresh entry
+// under the same key, the sweeper's delete misses and the fresh entry
+// lives on. entriesSize is decremented exactly once, by whichever
+// party's CompareAndDelete succeeds.
+func (s *MemoryStore) sweepOnce(cutoffNs int64) {
+	s.entries.Range(func(k, v any) bool {
+		e, ok := v.(*memoryEntry)
+		if !ok {
+			return true
+		}
+		last := e.lastSeen.Load()
+		if last == tombstoneNs || last >= cutoffNs {
+			return true
+		}
+		if !e.lastSeen.CompareAndSwap(last, tombstoneNs) {
+			return true
+		}
+		if s.entries.CompareAndDelete(k, e) {
+			s.entriesSize.Add(-1)
+		}
+		return true
+	})
 }
