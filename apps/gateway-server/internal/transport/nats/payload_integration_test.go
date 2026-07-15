@@ -53,8 +53,22 @@ func TestPayloadBudget_AgainstRealMaxPayload(t *testing.T) {
 		NATSReconnectBufSize: 1 << 20,
 	}
 
-	conn, err := Connect(cfg, zerolog.Nop())
-	require.NoError(t, err)
+	// The nats testcontainer with a custom config file can return from
+	// Run a beat before the server is accepting connections, and the
+	// production Connect uses a fail-fast timeout (no RetryOnFailed
+	// Connect). On a loaded CI runner that races into a spurious dial
+	// failure, so retry the initial connect until the container is
+	// truly ready rather than pinning the first attempt.
+	var conn *natsgo.Conn
+	require.Eventually(t, func() bool {
+		c, connErr := Connect(cfg, zerolog.Nop())
+		if connErr != nil {
+			return false
+		}
+		conn = c
+
+		return true
+	}, 15*time.Second, 250*time.Millisecond, "must connect to the NATS testcontainer")
 	t.Cleanup(conn.Close)
 
 	// Claim 1: the live connection reports the server's configured
