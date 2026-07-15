@@ -104,6 +104,21 @@ type Config struct {
 	// the oversized-header defence, so Load() rejects it.
 	MaxHeaderBytes int `env:"HTTP_MAX_HEADER_BYTES" envDefault:"16384"`
 
+	// TLSCertFile / TLSKeyFile enable TLS termination on the PUBLIC
+	// listener. Both must be set together (Load rejects one without the
+	// other) or both empty (plaintext, the default — for deployments
+	// that terminate TLS at an ingress, load balancer, or service mesh).
+	//
+	// IMPORTANT: enabling TLS switches Hertz off its netpoll transport
+	// onto the standard Go-net transport, because netpoll does not
+	// support TLS. That is a measurable hot-path change at high RPS —
+	// prefer terminating TLS at the mesh/LB and keeping the gateway on
+	// netpoll where the deployment's network is already encrypted.
+	// TLS-at-the-gateway is the fail-closed option for environments
+	// that cannot guarantee an encrypted hop to the pod.
+	TLSCertFile string `env:"TLS_CERT_FILE"`
+	TLSKeyFile  string `env:"TLS_KEY_FILE"`
+
 	// HTTPMaxConcurrentRequests caps the number of HTTP requests
 	// the gateway processes simultaneously. When the cap is reached
 	// the concurrency-limit middleware short-circuits new requests
@@ -201,6 +216,22 @@ type Config struct {
 	// deliberate operator act. Trailing newlines are trimmed; an
 	// unreadable or empty file fails startup closed.
 	NATSPasswordFile string `env:"NATS_PASSWORD_FILE"`
+
+	// NATSTLSCAFile is a PEM CA bundle used to verify the NATS server
+	// certificate (nats.RootCAs). Set it when the bus uses TLS with a
+	// private CA; unset relies on the system trust store (or plaintext
+	// when the URL scheme is nats://). The bus carries PHI, so an
+	// encrypted transport to NATS is expected in any real eHealth
+	// deployment.
+	NATSTLSCAFile string `env:"NATS_TLS_CA_FILE"`
+
+	// NATSTLSCertFile / NATSTLSKeyFile present a client certificate to
+	// NATS for mutual TLS (nats.ClientCert). Both must be set together
+	// or both empty — Load rejects one without the other. mTLS is how a
+	// server-cert-only bus is upgraded to prove the gateway's identity
+	// to NATS as well.
+	NATSTLSCertFile string `env:"NATS_TLS_CERT_FILE"`
+	NATSTLSKeyFile  string `env:"NATS_TLS_KEY_FILE"`
 	// NATSCredsFile is the filesystem path to an NKey credentials file,
 	// used for NGS / decentralised JWT auth.
 	NATSCredsFile string `env:"NATS_CREDS_FILE"`
@@ -431,6 +462,19 @@ func Load() (*Config, error) {
 	}
 	cfg.IPAllowList = allowList
 
+	// TLS cert/key are both-or-neither on both the public listener and
+	// the NATS client certificate. A lone cert or key is always a
+	// misconfiguration — fail startup closed rather than silently
+	// serving plaintext (public) or skipping mTLS (NATS) when the
+	// operator clearly intended TLS.
+	if err := validateCertKeyPair("TLS_CERT_FILE", cfg.TLSCertFile, "TLS_KEY_FILE", cfg.TLSKeyFile); err != nil {
+		return nil, err
+	}
+
+	if err := validateCertKeyPair("NATS_TLS_CERT_FILE", cfg.NATSTLSCertFile, "NATS_TLS_KEY_FILE", cfg.NATSTLSKeyFile); err != nil {
+		return nil, err
+	}
+
 	canonical, ok := allowedTrustedProxyHeaders[strings.ToLower(strings.TrimSpace(cfg.TrustedProxyHeader))]
 	if !ok {
 		return nil, fmt.Errorf("TRUSTED_PROXY_HEADER=%q is not one of "+
@@ -558,6 +602,28 @@ func validateHTTPLimits(cfg *Config) error {
 
 	return nil
 }
+
+// validateCertKeyPair enforces the both-or-neither rule for a TLS
+// certificate/key file pair: either both paths are set or both are
+// empty. A lone cert or key names the offending env var so the
+// operator sees exactly which half is missing.
+func validateCertKeyPair(certEnv, certPath, keyEnv, keyPath string) error {
+	switch {
+	case certPath == "" && keyPath == "":
+		return nil
+	case certPath == "":
+		return fmt.Errorf("%s is set but %s is empty (a TLS key requires its certificate)", keyEnv, certEnv)
+	case keyPath == "":
+		return fmt.Errorf("%s is set but %s is empty (a TLS certificate requires its key)", certEnv, keyEnv)
+	default:
+		return nil
+	}
+}
+
+// PublicTLSEnabled reports whether the public listener should terminate
+// TLS. Both cert and key are guaranteed present together by Load's
+// validateCertKeyPair check, so testing the cert alone is sufficient.
+func (c *Config) PublicTLSEnabled() bool { return c.TLSCertFile != "" }
 
 // validateListenSockets rejects listen-address configurations that
 // would race for one socket at runtime: both addresses are normalised
