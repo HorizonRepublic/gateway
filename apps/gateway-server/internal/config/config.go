@@ -431,58 +431,16 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("HTTP_MAX_CONCURRENT_REQUESTS must be ≥ 0 (0 disables the cap), got %d", cfg.HTTPMaxConcurrentRequests)
 	}
 
-	if cfg.ReadTimeout <= 0 {
-		return nil, fmt.Errorf("HTTP_READ_TIMEOUT must be > 0, got %s", cfg.ReadTimeout)
+	if err := validateHTTPLimits(cfg); err != nil {
+		return nil, err
 	}
 
-	if cfg.WriteTimeout <= 0 {
-		return nil, fmt.Errorf("HTTP_WRITE_TIMEOUT must be > 0, got %s", cfg.WriteTimeout)
-	}
-
-	if cfg.IdleTimeout <= 0 {
-		return nil, fmt.Errorf("HTTP_IDLE_TIMEOUT must be > 0, got %s", cfg.IdleTimeout)
-	}
-
-	if cfg.RequestTimeout <= 0 {
-		return nil, fmt.Errorf("REQUEST_TIMEOUT must be > 0, got %s", cfg.RequestTimeout)
-	}
-
-	if cfg.WriteTimeout <= cfg.RequestTimeout {
-		return nil, fmt.Errorf("HTTP_WRITE_TIMEOUT (%s) must be strictly greater than REQUEST_TIMEOUT (%s) — the 504 written at the request deadline must still fit inside the HTTP write deadline", cfg.WriteTimeout, cfg.RequestTimeout)
-	}
-
-	if cfg.ShutdownTimeout <= 0 {
-		return nil, fmt.Errorf("SHUTDOWN_TIMEOUT must be > 0 (there is no \"unlimited\" sentinel — a non-positive value pre-expires the drain context and force-drops in-flight requests), got %s", cfg.ShutdownTimeout)
-	}
-
-	if cfg.MaxBodyBytes < 0 {
-		return nil, fmt.Errorf("HTTP_MAX_BODY_BYTES must be ≥ 0 (0 disables the cap), got %d", cfg.MaxBodyBytes)
-	}
-
-	if cfg.MaxHeaderBytes <= 0 {
-		return nil, fmt.Errorf("HTTP_MAX_HEADER_BYTES must be > 0 (non-positive values disable the header cap entirely), got %d", cfg.MaxHeaderBytes)
+	if err := validateListenSockets(cfg); err != nil {
+		return nil, err
 	}
 
 	if cfg.NATSReconnectWait <= 0 {
 		return nil, fmt.Errorf("NATS_RECONNECT_WAIT must be > 0, got %s", cfg.NATSReconnectWait)
-	}
-
-	if cfg.OperatorHTTPAddr == "" {
-		return nil, fmt.Errorf("OPERATOR_HTTP_ADDR must be non-empty (operator surfaces never share the public socket)")
-	}
-
-	publicAddr, err := parseListenAddr("HTTP_ADDR", cfg.HTTPAddr)
-	if err != nil {
-		return nil, err
-	}
-
-	operatorAddr, err := parseListenAddr("OPERATOR_HTTP_ADDR", cfg.OperatorHTTPAddr)
-	if err != nil {
-		return nil, err
-	}
-
-	if publicAddr.collidesWith(operatorAddr) {
-		return nil, fmt.Errorf("OPERATOR_HTTP_ADDR=%q binds the same socket as HTTP_ADDR=%q (operator surfaces never share the public socket)", cfg.OperatorHTTPAddr, cfg.HTTPAddr)
 	}
 
 	if cfg.NATSMaxInflight < 0 {
@@ -493,25 +451,108 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("NATS_INFLIGHT_QUEUE_TIMEOUT must be > 0 and ≤ 10s, got %s", cfg.NATSInflightQueueTimeout)
 	}
 
-	if cfg.CircuitBreakerEnabled {
-		if cfg.CircuitBreakerFailureThreshold < 1 {
-			return nil, fmt.Errorf("CIRCUIT_BREAKER_FAILURE_THRESHOLD must be ≥ 1, got %d", cfg.CircuitBreakerFailureThreshold)
-		}
-
-		if cfg.CircuitBreakerRecoveryTimeout <= 0 {
-			return nil, fmt.Errorf("CIRCUIT_BREAKER_RECOVERY_TIMEOUT must be > 0, got %s", cfg.CircuitBreakerRecoveryTimeout)
-		}
-
-		if cfg.CircuitBreakerHalfOpenProbes < 1 {
-			return nil, fmt.Errorf("CIRCUIT_BREAKER_HALF_OPEN_PROBES must be ≥ 1, got %d", cfg.CircuitBreakerHalfOpenProbes)
-		}
-
-		if cfg.CircuitBreakerMaxSubjects < 1 {
-			return nil, fmt.Errorf("CIRCUIT_BREAKER_MAX_SUBJECTS must be ≥ 1, got %d", cfg.CircuitBreakerMaxSubjects)
-		}
+	if err := validateCircuitBreaker(cfg); err != nil {
+		return nil, err
 	}
 
 	return cfg, nil
+}
+
+// validateHTTPLimits rejects zero/negative values for the core HTTP
+// and request duration/size knobs, and enforces the WriteTimeout >
+// RequestTimeout invariant documented on Config.WriteTimeout. None of
+// these knobs has a safe non-positive interpretation at runtime, so
+// startup aborts instead of shipping an instantly-expired deadline or
+// an uncapped header path into traffic.
+func validateHTTPLimits(cfg *Config) error {
+	if cfg.ReadTimeout <= 0 {
+		return fmt.Errorf("HTTP_READ_TIMEOUT must be > 0, got %s", cfg.ReadTimeout)
+	}
+
+	if cfg.WriteTimeout <= 0 {
+		return fmt.Errorf("HTTP_WRITE_TIMEOUT must be > 0, got %s", cfg.WriteTimeout)
+	}
+
+	if cfg.IdleTimeout <= 0 {
+		return fmt.Errorf("HTTP_IDLE_TIMEOUT must be > 0, got %s", cfg.IdleTimeout)
+	}
+
+	if cfg.RequestTimeout <= 0 {
+		return fmt.Errorf("REQUEST_TIMEOUT must be > 0, got %s", cfg.RequestTimeout)
+	}
+
+	if cfg.WriteTimeout <= cfg.RequestTimeout {
+		return fmt.Errorf("HTTP_WRITE_TIMEOUT (%s) must be strictly greater than REQUEST_TIMEOUT (%s) — the 504 written at the request deadline must still fit inside the HTTP write deadline", cfg.WriteTimeout, cfg.RequestTimeout)
+	}
+
+	if cfg.ShutdownTimeout <= 0 {
+		return fmt.Errorf("SHUTDOWN_TIMEOUT must be > 0 (there is no \"unlimited\" sentinel — a non-positive value pre-expires the drain context and force-drops in-flight requests), got %s", cfg.ShutdownTimeout)
+	}
+
+	if cfg.MaxBodyBytes < 0 {
+		return fmt.Errorf("HTTP_MAX_BODY_BYTES must be ≥ 0 (0 disables the cap), got %d", cfg.MaxBodyBytes)
+	}
+
+	if cfg.MaxHeaderBytes <= 0 {
+		return fmt.Errorf("HTTP_MAX_HEADER_BYTES must be > 0 (non-positive values disable the header cap entirely), got %d", cfg.MaxHeaderBytes)
+	}
+
+	return nil
+}
+
+// validateListenSockets rejects listen-address configurations that
+// would race for one socket at runtime: both addresses are normalised
+// to host:port form and compared, so differently-spelled duplicates
+// (":8080" vs "0.0.0.0:8080") fail here instead of losing a bind race
+// inside a server goroutine whose error is only logged.
+func validateListenSockets(cfg *Config) error {
+	if cfg.OperatorHTTPAddr == "" {
+		return fmt.Errorf("OPERATOR_HTTP_ADDR must be non-empty (operator surfaces never share the public socket)")
+	}
+
+	publicAddr, err := parseListenAddr("HTTP_ADDR", cfg.HTTPAddr)
+	if err != nil {
+		return err
+	}
+
+	operatorAddr, err := parseListenAddr("OPERATOR_HTTP_ADDR", cfg.OperatorHTTPAddr)
+	if err != nil {
+		return err
+	}
+
+	if publicAddr.collidesWith(operatorAddr) {
+		return fmt.Errorf("OPERATOR_HTTP_ADDR=%q binds the same socket as HTTP_ADDR=%q (operator surfaces never share the public socket)", cfg.OperatorHTTPAddr, cfg.HTTPAddr)
+	}
+
+	return nil
+}
+
+// validateCircuitBreaker checks the breaker knobs only when the
+// breaker is enabled — a disabled breaker never reads them, and
+// rejecting unused values would turn a dormant misconfiguration into
+// a startup failure.
+func validateCircuitBreaker(cfg *Config) error {
+	if !cfg.CircuitBreakerEnabled {
+		return nil
+	}
+
+	if cfg.CircuitBreakerFailureThreshold < 1 {
+		return fmt.Errorf("CIRCUIT_BREAKER_FAILURE_THRESHOLD must be ≥ 1, got %d", cfg.CircuitBreakerFailureThreshold)
+	}
+
+	if cfg.CircuitBreakerRecoveryTimeout <= 0 {
+		return fmt.Errorf("CIRCUIT_BREAKER_RECOVERY_TIMEOUT must be > 0, got %s", cfg.CircuitBreakerRecoveryTimeout)
+	}
+
+	if cfg.CircuitBreakerHalfOpenProbes < 1 {
+		return fmt.Errorf("CIRCUIT_BREAKER_HALF_OPEN_PROBES must be ≥ 1, got %d", cfg.CircuitBreakerHalfOpenProbes)
+	}
+
+	if cfg.CircuitBreakerMaxSubjects < 1 {
+		return fmt.Errorf("CIRCUIT_BREAKER_MAX_SUBJECTS must be ≥ 1, got %d", cfg.CircuitBreakerMaxSubjects)
+	}
+
+	return nil
 }
 
 // listenAddr is the normalised form of a host:port listen address used
