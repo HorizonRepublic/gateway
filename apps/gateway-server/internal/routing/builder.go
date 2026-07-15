@@ -327,7 +327,7 @@ func sanitizeRateLimit(rl *registry.RateLimitMeta, key string, logger zerolog.Lo
 // Keeping this step purely mechanical makes it trivial to reason
 // about in tests and benchmarks.
 func BuildTableFromRoutes(routes []Route) Table {
-	table := newLinearTable()
+	table := newIndexedTable()
 	for _, route := range routes {
 		table.add(route)
 	}

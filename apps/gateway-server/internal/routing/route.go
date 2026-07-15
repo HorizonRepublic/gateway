@@ -16,7 +16,7 @@ import (
 // PathTemplate as a cache key for logs and metrics.
 //
 // The struct is deliberately small and value-typed: routes are stored
-// by value inside the linearTable bucket and copied out on each
+// by value inside the indexedTable buckets and copied out on each
 // successful Lookup, which keeps the hot path allocation-free.
 type Route struct {
 	// Subject is the pre-computed NATS RPC subject (e.g.

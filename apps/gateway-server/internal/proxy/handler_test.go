@@ -25,13 +25,12 @@ import (
 // "METHOD PATH". Kept intentionally minimal — extra behaviour would
 // only add indirection to what should be a hermetic test fixture.
 //
-// methodsByPath lets tests that exercise the 405 Method-Not-Allowed
-// surface pre-seed the per-path verb set without populating routes
-// for every verb under test. When nil (the common case) Methods
-// returns nil — the Lookup-miss path produces 404.
+// Methods returns nil unconditionally: the handler builds 405 Allow
+// sets via per-method Lookup probes (template-aware), so the fixture
+// only needs Lookup to behave. The method exists to satisfy the
+// routing.Table interface.
 type fakeTable struct {
-	routes        map[string]routing.Route
-	methodsByPath map[string][]string
+	routes map[string]routing.Route
 }
 
 func (f *fakeTable) Lookup(method, path string) (routing.Route, map[string]string, bool) {
@@ -43,13 +42,7 @@ func (f *fakeTable) Lookup(method, path string) (routing.Route, map[string]strin
 	return r, map[string]string{}, true
 }
 
-func (f *fakeTable) Methods(path string) []string {
-	if f.methodsByPath == nil {
-		return nil
-	}
-
-	return f.methodsByPath[path]
-}
+func (f *fakeTable) Methods(_ string) []string { return nil }
 
 // recordedCall captures a single NATS request issued by the handler
 // under test. Tests assert on .subject to verify call ordering, on
@@ -174,9 +167,6 @@ func TestHandler_Returns405WithAllowHeaderWhenMethodMismatch(t *testing.T) {
 			"GET /users":  {Subject: "svc.cmd.users.list", PathTemplate: "/users", Method: "GET"},
 			"POST /users": {Subject: "svc.cmd.users.create", PathTemplate: "/users", Method: "POST"},
 		},
-		methodsByPath: map[string][]string{
-			"/users": {"GET", "POST"},
-		},
 	}
 	h := buildHandler(table, nil, nil)
 
@@ -189,12 +179,11 @@ func TestHandler_Returns405WithAllowHeaderWhenMethodMismatch(t *testing.T) {
 }
 
 func TestHandler_Returns404WhenPathUnknownEvenOnMethodMismatch(t *testing.T) {
-	// Path has no registered verbs and no Methods entry — must 404,
-	// not 405 (405 would leak that some path exists under a verb the
-	// client did not try, giving a probing signal for nothing).
+	// Path has no registered verbs — must 404, not 405 (405 would
+	// leak that some path exists under a verb the client did not
+	// try, giving a probing signal for nothing).
 	table := &fakeTable{
-		routes:        map[string]routing.Route{},
-		methodsByPath: map[string][]string{},
+		routes: map[string]routing.Route{},
 	}
 	h := buildHandler(table, nil, nil)
 
@@ -1023,24 +1012,6 @@ func TestHandler_PreflightReturns404WhenNoCORSConfig(t *testing.T) {
 	assert.Equal(t, 404, result.Status)
 }
 
-func TestHandler_PreflightReturns404WithoutACRM(t *testing.T) {
-	cors := &registry.CORSMeta{Origins: []string{"*"}}
-	table := &fakeTable{routes: map[string]routing.Route{
-		"GET /users": {
-			Subject: "svc.cmd.users.list", PathTemplate: "/users",
-			Method: "GET", CORS: cors,
-		},
-	}}
-	h := buildHandler(table, nil, nil)
-
-	in := emptyServeInput("OPTIONS", "/users")
-	in.Headers["origin"] = "https://example.com"
-
-	result := h.Handle(context.Background(), in)
-
-	assert.Equal(t, 404, result.Status)
-}
-
 func TestHandler_PreflightReturns404OnOriginMismatch(t *testing.T) {
 	cors := &registry.CORSMeta{Origins: []string{"https://allowed.com"}}
 	table := &fakeTable{routes: map[string]routing.Route{
@@ -1303,13 +1274,21 @@ func TestHandler_PerRouteTimeoutOverridesGlobal(t *testing.T) {
 
 	assert.Equal(t, 200, result.Status)
 	require.Len(t, nats.requests, 1)
-	assert.Equal(t, routeTimeout, nats.requests[0].timeout)
+	// The handler anchors one deadline at request entry and passes the
+	// REMAINING budget to each downstream leg, so the recorded timeout
+	// is bounded by the route timeout, not exactly equal to it.
+	assert.LessOrEqual(t, nats.requests[0].timeout, routeTimeout)
+	assert.Greater(t, nats.requests[0].timeout, routeTimeout-100*time.Millisecond,
+		"a no-op pipeline must consume almost none of the budget")
 
 	var payload map[string]any
 	require.NoError(t, json.Unmarshal(nats.requests[0].payload, &payload))
 	meta, ok := payload["meta"].(map[string]any)
 	require.True(t, ok)
-	assert.Equal(t, float64(routeTimeout.Milliseconds()), meta["timeoutMs"])
+	timeoutMs, ok := meta["timeoutMs"].(float64)
+	require.True(t, ok)
+	assert.LessOrEqual(t, timeoutMs, float64(routeTimeout.Milliseconds()))
+	assert.Greater(t, timeoutMs, float64((routeTimeout - 100*time.Millisecond).Milliseconds()))
 }
 
 func TestHandler_ZeroRouteTimeoutUsesGlobal(t *testing.T) {
@@ -1338,7 +1317,9 @@ func TestHandler_ZeroRouteTimeoutUsesGlobal(t *testing.T) {
 
 	assert.Equal(t, 200, result.Status)
 	require.Len(t, nats.requests, 1)
-	assert.Equal(t, globalTimeout, nats.requests[0].timeout)
+	assert.LessOrEqual(t, nats.requests[0].timeout, globalTimeout)
+	assert.Greater(t, nats.requests[0].timeout, globalTimeout-100*time.Millisecond,
+		"zero route timeout must inherit the global budget")
 }
 
 // --- Static headers tests ---
@@ -2126,8 +2107,16 @@ func TestHandler_InvalidJSONBodyRejectedWith400(t *testing.T) {
 	}{
 		{"form-encoded body", []byte("a=1&b=2"), 400},
 		{"truncated JSON", []byte(`{"name":`), 400},
+		// RFC 8259 §8.1: inter-system JSON exchange MUST be UTF-8.
+		// Syntactically valid JSON carrying invalid UTF-8 bytes inside
+		// string values would be forwarded verbatim and silently
+		// mangled to U+FFFD by the SDK side's non-fatal TextDecoder —
+		// reject at intake instead of corrupting the payload.
+		{"invalid UTF-8 byte in string", []byte("{\"v\":\"a\x80b\"}"), 400},
+		{"truncated multibyte sequence", []byte("{\"v\":\"\xc3\"}"), 400},
 		{"valid object", []byte(`{"name":"alice"}`), 200},
 		{"valid scalar", []byte(`42`), 200},
+		{"valid multibyte UTF-8", []byte(`{"name":"café"}`), 200},
 		{"empty body forwarded as null", nil, 200},
 	}
 

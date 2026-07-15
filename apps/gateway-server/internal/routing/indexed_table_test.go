@@ -6,8 +6,8 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestLinearTable_ExactMatch(t *testing.T) {
-	table := newLinearTable()
+func TestIndexedTable_ExactMatch(t *testing.T) {
+	table := newIndexedTable()
 	table.add(Route{
 		Subject:      "users-svc__microservice.cmd.users.list",
 		Method:       "GET",
@@ -20,8 +20,8 @@ func TestLinearTable_ExactMatch(t *testing.T) {
 	assert.Empty(t, params)
 }
 
-func TestLinearTable_PathParamMatch(t *testing.T) {
-	table := newLinearTable()
+func TestIndexedTable_PathParamMatch(t *testing.T) {
+	table := newIndexedTable()
 	table.add(Route{
 		Subject:      "users-svc__microservice.cmd.users.get",
 		Method:       "GET",
@@ -34,8 +34,8 @@ func TestLinearTable_PathParamMatch(t *testing.T) {
 	assert.Equal(t, map[string]string{"id": "42"}, params)
 }
 
-func TestLinearTable_MultipleParams(t *testing.T) {
-	table := newLinearTable()
+func TestIndexedTable_MultipleParams(t *testing.T) {
+	table := newIndexedTable()
 	table.add(Route{
 		Subject:      "orders-svc__microservice.cmd.orders.item.get",
 		Method:       "GET",
@@ -48,8 +48,8 @@ func TestLinearTable_MultipleParams(t *testing.T) {
 	assert.Equal(t, map[string]string{"orderId": "abc", "itemId": "xyz"}, params)
 }
 
-func TestLinearTable_MissReturnsFalse(t *testing.T) {
-	table := newLinearTable()
+func TestIndexedTable_MissReturnsFalse(t *testing.T) {
+	table := newIndexedTable()
 	table.add(Route{
 		Subject:      "users-svc__microservice.cmd.users.list",
 		Method:       "GET",
@@ -62,8 +62,8 @@ func TestLinearTable_MissReturnsFalse(t *testing.T) {
 	assert.Nil(t, params)
 }
 
-func TestLinearTable_MethodMismatch(t *testing.T) {
-	table := newLinearTable()
+func TestIndexedTable_MethodMismatch(t *testing.T) {
+	table := newIndexedTable()
 	table.add(Route{
 		Subject:      "users-svc__microservice.cmd.users.list",
 		Method:       "GET",
@@ -74,8 +74,8 @@ func TestLinearTable_MethodMismatch(t *testing.T) {
 	assert.False(t, ok)
 }
 
-func TestLinearTable_DifferentPathSegmentCountNoMatch(t *testing.T) {
-	table := newLinearTable()
+func TestIndexedTable_DifferentPathSegmentCountNoMatch(t *testing.T) {
+	table := newIndexedTable()
 	table.add(Route{
 		Subject:      "users-svc__microservice.cmd.users.get",
 		Method:       "GET",
@@ -87,8 +87,8 @@ func TestLinearTable_DifferentPathSegmentCountNoMatch(t *testing.T) {
 	assert.False(t, ok)
 }
 
-func TestLinearTable_Methods(t *testing.T) {
-	table := newLinearTable()
+func TestIndexedTable_Methods(t *testing.T) {
+	table := newIndexedTable()
 	table.add(Route{
 		Subject:      "users-svc__microservice.cmd.users.list",
 		Method:       "GET",
