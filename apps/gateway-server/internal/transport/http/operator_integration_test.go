@@ -168,16 +168,36 @@ func TestIntegration_OperatorListenerShutdownLeaksNoGoroutines(t *testing.T) {
 	before := runtime.NumGoroutine()
 
 	base, shutdown := startOperator(t, observability.NewMetrics())
-	status, _ := operatorGET(t, base+"/metrics")
-	require.Equal(t, http.StatusOK, status)
+
+	// A keep-alive connection keeps a persistConn goroutine pair alive
+	// on the client AND a conn.serve goroutine on the server until the
+	// idle connection is actually torn down, whose timing is OS-
+	// scheduler-dependent (settles fast on the Linux CI runner, lags
+	// several seconds on macOS) and read as a phantom leak. Disabling
+	// keep-alive closes the connection the moment the response is read,
+	// so both goroutines unwind synchronously with Shutdown and the
+	// assertion measures a real leak, not client-pool latency.
+	client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
+	resp, err := client.Get(base + "/metrics")
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	_ = resp.Body.Close()
+
 	shutdown()
+	client.CloseIdleConnections()
 
-	// Idle keep-alive connections from the default client would read
-	// as leaks; drop them before counting.
-	http.DefaultClient.CloseIdleConnections()
-
-	assert.Eventually(t, func() bool {
-		return runtime.NumGoroutine() <= before
-	}, 5*time.Second, 10*time.Millisecond,
+	// Poll with a plain loop, NOT assert.Eventually: testify runs its
+	// condition in a spawned goroutine, which the count inside the
+	// condition would include — the measurement would then race its
+	// own harness and never settle to the pre-boot level.
+	settled := false
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+		if runtime.NumGoroutine() <= before {
+			settled = true
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	assert.True(t, settled,
 		"goroutine count must settle to the pre-boot level after Shutdown")
 }
