@@ -173,6 +173,32 @@ describe('GatewayRoute lazy defaults merge', () => {
     expect(second).not.toBe(first);
   });
 
+  it('publishes an explicit CORS headers list when the route omits one (wire-shape guard)', () => {
+    class CorsFixture {
+      @GatewayRoute({
+        pattern: 'orders.create',
+        method: 'POST',
+        path: '/orders',
+        cors: { origins: ['https://app.example.com'] },
+      })
+      public createOrder(): string {
+        return 'ok';
+      }
+    }
+
+    const extras = Reflect.getMetadata(
+      PATTERN_EXTRAS_METADATA,
+      CorsFixture.prototype.createOrder,
+    ) as { meta: Record<string, unknown> };
+
+    // The registry entry must carry the documented default explicitly —
+    // the Go side adds no implicit Access-Control-Allow-Headers values.
+    expect(extras.meta['cors']).toEqual({
+      origins: ['https://app.example.com'],
+      headers: ['Content-Type', 'Authorization', 'X-Request-Id'],
+    });
+  });
+
   it('throws on assignment to extras.meta', () => {
     const extras = decorate();
 

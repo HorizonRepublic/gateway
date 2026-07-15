@@ -7,6 +7,7 @@
 package codec
 
 import (
+	"encoding/json"
 	"fmt"
 
 	"github.com/bytedance/sonic"
@@ -50,11 +51,25 @@ func Unmarshal(data []byte, v any) error {
 	return nil
 }
 
-// Valid reports whether data is a syntactically valid JSON document.
-// Wraps sonic's SIMD-accelerated validator so callers stay decoupled
-// from the underlying implementation. Used by the proxy intake guard:
-// the request envelope is one JSON text, so embedding a non-JSON body
-// would invalidate the whole document for every upstream consumer.
+// Valid reports whether data is a syntactically valid RFC 8259 JSON
+// document. Used by the proxy intake guard: the request envelope is
+// one JSON text, so embedding a non-JSON body would invalidate the
+// whole document for every upstream consumer.
+//
+// The check runs in two phases: sonic's SIMD-accelerated validator
+// rejects malformed input fast, and encoding/json's scanner confirms
+// every acceptance. The confirmation pass exists because sonic's
+// validator is laxer than RFC 8259 in ways fuzzing has demonstrated
+// concretely: it accepts raw control bytes inside string values
+// (§7 requires them escaped), invalid escape sequences such as `\0`,
+// and truncated literals such as a bare `n`. Strict downstream
+// parsers (encoding/json, the SDK side's JSON.parse, this package's
+// own Unmarshal) reject all of those, so a body that passed a
+// sonic-only guard could produce a request envelope the upstream
+// cannot decode — surfacing as a 5xx from the handler instead of a
+// clean 400 at the gate. FuzzValid holds Valid to the containment
+// invariant: everything it accepts, the strict stdlib scanner
+// accepts too.
 func Valid(data []byte) bool {
-	return sonic.Valid(data)
+	return sonic.Valid(data) && json.Valid(data)
 }
