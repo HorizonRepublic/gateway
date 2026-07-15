@@ -16,7 +16,6 @@ package http
 
 import (
 	"context"
-	"strings"
 	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
@@ -168,32 +167,33 @@ func buildServeInput(ctx *app.RequestContext) *proxy.ServeInput {
 // upstream handler's Array.isArray() discriminator still works.
 //
 // A request without a query string returns a nil map so the GET-heavy
-// common case allocates nothing here. Downstream consumers already
-// treat nil and empty identically: the envelope encoder ranges over
-// the map (a no-op for nil) into its pooled non-nil Query map, so the
-// wire shape stays `"query":{}` either way.
+// common case allocates nothing here — the two intermediate maps the
+// previous unconditional collection built are skipped entirely.
+// Downstream consumers already treat nil and empty identically: the
+// envelope encoder ranges over the map (a no-op for nil) into its
+// pooled non-nil Query map, so the wire shape stays `"query":{}`
+// either way. The nil path is pinned by
+// TestBuildServeInput_NoQueryStringYieldsNilQuery and the wire shape
+// by TestAppendEnvelopeJSON_NilQueryEncodesAsEmptyObject.
 //
 // Two-pass collection — accumulate into an intermediate
 // map[string][]string, then convert — is deliberate: Hertz's
 // VisitAll callback fires once per (key, value) pair, and attempting
 // to make the union decision in the callback requires mutating the
 // target map mid-iteration, which is error-prone and harder to read.
-// The accumulator is allocated lazily on the first visited pair, so
-// the query-less path never pays for it.
+// The early Len() gate keeps that two-map cost off the query-less
+// path without adding a branch to the populated path's inner loop.
 func collectQueryValues(ctx *app.RequestContext) map[string]proxy.QueryValue {
-	var accumulator map[string][]string
-	ctx.QueryArgs().VisitAll(func(key, value []byte) {
-		if accumulator == nil {
-			accumulator = make(map[string][]string, initialQueryCap)
-		}
+	args := ctx.QueryArgs()
+	if args.Len() == 0 {
+		return nil
+	}
 
+	accumulator := make(map[string][]string, initialQueryCap)
+	args.VisitAll(func(key, value []byte) {
 		k := string(key)
 		accumulator[k] = append(accumulator[k], string(value))
 	})
-
-	if len(accumulator) == 0 {
-		return nil
-	}
 
 	result := make(map[string]proxy.QueryValue, len(accumulator))
 	for k, values := range accumulator {
@@ -261,12 +261,19 @@ func writeServeResult(ctx *app.RequestContext, result *proxy.ServeResult, reques
 	ctx.Response.SetBody(result.Body)
 }
 
+// maxStackHeaderKey caps the stack buffer lowerHeaderKey lowercases
+// into. Header field names are short by construction — the longest
+// standard name is well under 64 bytes and typical custom names ("x-…")
+// shorter still — so realistic keys never spill to the heap branch.
+const maxStackHeaderKey = 64
+
 // lowerHeaderKey converts a raw header key to its lowercase string
 // form in exactly one allocation. The generic
 // string(bytes.ToLower(key)) idiom costs two — bytes.ToLower copies
-// into a fresh []byte and the string conversion copies again — which
-// on a request with a dozen headers is a dozen avoidable allocations
-// per request.
+// into a fresh heap []byte and the string conversion copies that
+// again — which on a request with a dozen headers is a dozen
+// avoidable allocations per request. Here the lowercasing happens in
+// a stack buffer, so only the final string conversion allocates.
 //
 // Lowering is ASCII-only: RFC 9110 §5.1 restricts field names to the
 // token charset, a subset of ASCII, so bytes >= 0x80 cannot appear in
@@ -274,33 +281,33 @@ func writeServeResult(ctx *app.RequestContext, result *proxy.ServeResult, reques
 // they would form are invalid header names either way and match none
 // of the lowercase keys downstream code looks up.
 func lowerHeaderKey(key []byte) string {
-	upperAt := -1
-	for i := 0; i < len(key); i++ {
-		if 'A' <= key[i] && key[i] <= 'Z' {
-			upperAt = i
-			break
+	if len(key) <= maxStackHeaderKey {
+		var buf [maxStackHeaderKey]byte
+		n := copy(buf[:], key)
+		lowerASCII(buf[:n])
+
+		return string(buf[:n])
+	}
+
+	// Pathologically long header name: lowercase into a heap slice.
+	// Two allocations here (slice + string) are acceptable because
+	// this branch is unreachable for any conformant client.
+	lower := make([]byte, len(key))
+	copy(lower, key)
+	lowerASCII(lower)
+
+	return string(lower)
+}
+
+// lowerASCII lowercases the ASCII uppercase letters of b in place,
+// leaving every other byte untouched. Kept branch-light so the
+// compiler can keep it inlined on the header hot path.
+func lowerASCII(b []byte) {
+	for i := 0; i < len(b); i++ {
+		if c := b[i]; 'A' <= c && c <= 'Z' {
+			b[i] = c + ('a' - 'A')
 		}
 	}
-
-	// Already lowercase (HTTP/2 style): the string conversion is the
-	// single unavoidable allocation.
-	if upperAt < 0 {
-		return string(key)
-	}
-
-	// strings.Builder hands its internal buffer to the returned string
-	// without the extra copy a plain string([]byte) conversion pays.
-	var sb strings.Builder
-	sb.Grow(len(key))
-	sb.Write(key[:upperAt])
-	for _, c := range key[upperAt:] {
-		if 'A' <= c && c <= 'Z' {
-			c += 'a' - 'A'
-		}
-		sb.WriteByte(c)
-	}
-
-	return sb.String()
 }
 
 // headerJoinSeparator returns the delimiter used when merging
