@@ -454,6 +454,168 @@ func TestLoad_BreakerDisabledSkipsBreakerValidation(t *testing.T) {
 	require.NoError(t, err, "breaker knobs are not validated when the breaker is off")
 }
 
+// TestLoad_CoreDurationAndSizeValidation pins the fail-closed bounds
+// on the core HTTP/request duration and size knobs. Zero and negative
+// values have no safe interpretation at runtime (a zero REQUEST_TIMEOUT
+// yields an instantly-expired deadline and a 504 on every request; a
+// zero SHUTDOWN_TIMEOUT pre-expires the drain context and force-drops
+// in-flight requests; a non-positive HTTP_MAX_HEADER_BYTES disables
+// the header cap entirely), so Load() must reject them before traffic
+// hits the pod.
+func TestLoad_CoreDurationAndSizeValidation(t *testing.T) {
+	cases := []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{"zero read timeout", map[string]string{"HTTP_READ_TIMEOUT": "0"}, "HTTP_READ_TIMEOUT"},
+		{"negative read timeout", map[string]string{"HTTP_READ_TIMEOUT": "-1s"}, "HTTP_READ_TIMEOUT"},
+		{"zero write timeout", map[string]string{"HTTP_WRITE_TIMEOUT": "0"}, "HTTP_WRITE_TIMEOUT"},
+		{"zero idle timeout", map[string]string{"HTTP_IDLE_TIMEOUT": "0"}, "HTTP_IDLE_TIMEOUT"},
+		{"zero request timeout", map[string]string{"REQUEST_TIMEOUT": "0"}, "REQUEST_TIMEOUT"},
+		{"negative request timeout", map[string]string{"REQUEST_TIMEOUT": "-5s"}, "REQUEST_TIMEOUT"},
+		{"zero shutdown timeout", map[string]string{"SHUTDOWN_TIMEOUT": "0"}, "SHUTDOWN_TIMEOUT"},
+		{"negative shutdown timeout", map[string]string{"SHUTDOWN_TIMEOUT": "-1s"}, "SHUTDOWN_TIMEOUT"},
+		{"negative body cap", map[string]string{"HTTP_MAX_BODY_BYTES": "-1"}, "HTTP_MAX_BODY_BYTES"},
+		{"zero header cap", map[string]string{"HTTP_MAX_HEADER_BYTES": "0"}, "HTTP_MAX_HEADER_BYTES"},
+		{"negative header cap", map[string]string{"HTTP_MAX_HEADER_BYTES": "-1"}, "HTTP_MAX_HEADER_BYTES"},
+		{"zero reconnect wait", map[string]string{"NATS_RECONNECT_WAIT": "0"}, "NATS_RECONNECT_WAIT"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setRequiredEnv(t)
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+
+			_, err := Load()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.want,
+				"error must name the offending env var for operator diagnosis")
+		})
+	}
+}
+
+// TestLoad_ZeroBodyCapAccepted pins the documented sentinel: zero
+// disables the body cap (Hertz-side handling); only negative values
+// are rejected.
+func TestLoad_ZeroBodyCapAccepted(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("HTTP_MAX_BODY_BYTES", "0")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), cfg.MaxBodyBytes)
+}
+
+// TestLoad_WriteTimeoutInvariantEnforced pins the enforcement of the
+// invariant documented on Config.WriteTimeout: the HTTP write deadline
+// must strictly exceed the request deadline, or the 504 emitted at the
+// request deadline is truncated or dropped on the wire.
+func TestLoad_WriteTimeoutInvariantEnforced(t *testing.T) {
+	t.Run("equal timeouts rejected", func(t *testing.T) {
+		setRequiredEnv(t)
+		t.Setenv("HTTP_WRITE_TIMEOUT", "30s") // == default REQUEST_TIMEOUT
+
+		_, err := Load()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "HTTP_WRITE_TIMEOUT")
+		assert.Contains(t, err.Error(), "REQUEST_TIMEOUT")
+	})
+
+	t.Run("write below request rejected", func(t *testing.T) {
+		setRequiredEnv(t)
+		t.Setenv("HTTP_WRITE_TIMEOUT", "20s")
+		t.Setenv("REQUEST_TIMEOUT", "25s")
+
+		_, err := Load()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "HTTP_WRITE_TIMEOUT")
+	})
+
+	t.Run("strict slack accepted", func(t *testing.T) {
+		setRequiredEnv(t)
+		t.Setenv("HTTP_WRITE_TIMEOUT", "25s")
+		t.Setenv("REQUEST_TIMEOUT", "20s")
+
+		cfg, err := Load()
+		require.NoError(t, err)
+		assert.Equal(t, 25*time.Second, cfg.WriteTimeout)
+	})
+}
+
+// TestLoad_OperatorAddrCollision_NormalizedForms pins the socket-level
+// collision check: addresses are compared after host:port
+// normalisation, so spelling the same wildcard socket two ways
+// (":8080" vs "0.0.0.0:8080" vs "[::]:8080") cannot slip past
+// validation into a nondeterministic bind race at runtime.
+func TestLoad_OperatorAddrCollision_NormalizedForms(t *testing.T) {
+	cases := []struct {
+		name     string
+		httpAddr string
+		opAddr   string
+		collide  bool
+	}{
+		{"wildcard vs explicit ipv4 wildcard", ":8080", "0.0.0.0:8080", true},
+		{"wildcard vs explicit ipv6 wildcard", ":8080", "[::]:8080", true},
+		{"explicit ipv4 wildcard vs ipv6 wildcard", "0.0.0.0:8080", "[::]:8080", true},
+		{"specific host vs wildcard same port", "127.0.0.1:8080", ":8080", true},
+		{"wildcard vs specific host same port", ":8080", "127.0.0.1:8080", true},
+		{"same specific host and port", "127.0.0.1:9090", "127.0.0.1:9090", true},
+		{"same port different specific hosts", "127.0.0.1:8081", "192.168.0.1:8081", false},
+		{"same host different ports", "127.0.0.1:8080", "127.0.0.1:8081", false},
+		{"wildcards on different ports", ":8080", ":8081", false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setRequiredEnv(t)
+			t.Setenv("HTTP_ADDR", tc.httpAddr)
+			t.Setenv("OPERATOR_HTTP_ADDR", tc.opAddr)
+
+			_, err := Load()
+			if tc.collide {
+				require.Error(t, err,
+					"same socket spelled differently must fail Load() — the loser of the bind race dies silently at runtime")
+				assert.Contains(t, err.Error(), "OPERATOR_HTTP_ADDR")
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+// TestLoad_ListenAddrs_MalformedFailClosed pins the fail-closed arm of
+// the normalisation: an address that cannot be split into host:port
+// (or carries an invalid port) aborts startup instead of deferring the
+// failure to net.Listen inside a goroutine whose error is only logged.
+func TestLoad_ListenAddrs_MalformedFailClosed(t *testing.T) {
+	cases := []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{"operator addr without port", map[string]string{"OPERATOR_HTTP_ADDR": "garbage"}, "OPERATOR_HTTP_ADDR"},
+		{"operator addr invalid port", map[string]string{"OPERATOR_HTTP_ADDR": ":notaport"}, "OPERATOR_HTTP_ADDR"},
+		{"http addr without port", map[string]string{"HTTP_ADDR": "no-port"}, "HTTP_ADDR"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setRequiredEnv(t)
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+
+			_, err := Load()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.want,
+				"error must name the offending env var for operator diagnosis")
+		})
+	}
+}
+
 func TestLoad_OperatorAddrDefaultsAndValidation(t *testing.T) {
 	t.Setenv("NATS_URLS", "nats://localhost:4222")
 	t.Setenv("KV_BUCKET", "handler_registry")
