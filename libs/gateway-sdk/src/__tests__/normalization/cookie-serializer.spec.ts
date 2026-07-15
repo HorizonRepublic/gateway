@@ -253,3 +253,84 @@ describe('serializeCookie — size awareness', () => {
     expect(warnSpy).not.toHaveBeenCalled();
   });
 });
+
+describe('serializeCookie — attribute-injection guards (rfc6265bis §4.1.1 grammar)', () => {
+  it('throws when path contains a `;` (attribute-injection vector)', () => {
+    expect(() =>
+      serializeCookie('return_to', 'v', { path: '/; Domain=.example.com; SameSite=None' }),
+    ).toThrow(/Path/);
+  });
+
+  it('throws when path contains control characters', () => {
+    expect(() => serializeCookie('sid', 'v', { path: '/api\r\nSet-Cookie: evil=1' })).toThrow(
+      /Path/,
+    );
+    expect(() => serializeCookie('sid', 'v', { path: '/api\u0000' })).toThrow(/Path/);
+  });
+
+  it('throws when domain contains a `;`', () => {
+    expect(() =>
+      serializeCookie('sid', 'v', { domain: 'example.com; SameSite=None; Secure' }),
+    ).toThrow(/Domain/);
+  });
+
+  it('throws when domain contains CR/LF', () => {
+    expect(() => serializeCookie('sid', 'v', { domain: 'example.com\r\nX-Evil: 1' })).toThrow(
+      /Domain/,
+    );
+  });
+
+  it('throws when domain is not an RFC 1123 host name', () => {
+    expect(() => serializeCookie('sid', 'v', { domain: 'exa mple.com' })).toThrow(/Domain/);
+    expect(() => serializeCookie('sid', 'v', { domain: '-bad.example.com' })).toThrow(/Domain/);
+    expect(() => serializeCookie('sid', 'v', { domain: '' })).toThrow(/Domain/);
+  });
+
+  it('throws when a domain label exceeds 63 octets (RFC 1034 §3.5 cap)', () => {
+    const oversized = `${'a'.repeat(64)}.example.com`;
+
+    expect(() => serializeCookie('sid', 'v', { domain: oversized })).toThrow(/Domain/);
+    expect(serializeCookie('sid', 'v', { domain: `${'a'.repeat(63)}.example.com` })).toBe(
+      `sid=v; Domain=${'a'.repeat(63)}.example.com`,
+    );
+  });
+
+  it('accepts a leading-dot domain (UAs ignore the dot)', () => {
+    expect(serializeCookie('sid', 'v', { domain: '.example.com' })).toBe(
+      'sid=v; Domain=.example.com',
+    );
+  });
+
+  it('accepts every av-octet in path (printable US-ASCII minus `;`)', () => {
+    expect(serializeCookie('sid', 'v', { path: '/a b/c?d=e&f=<g>~' })).toBe(
+      'sid=v; Path=/a b/c?d=e&f=<g>~',
+    );
+  });
+
+  it('validates values arriving through module-level defaults too', () => {
+    expect(() => serializeCookie('sid', 'v', {}, { path: '/; Secure' })).toThrow(/Path/);
+  });
+});
+
+describe('serializeCookie — lifetime attribute validation', () => {
+  it('throws on NaN maxAge instead of shipping Max-Age=NaN', () => {
+    expect(() => serializeCookie('sid', 'v', { maxAge: Number.NaN })).toThrow(/Max-Age/);
+  });
+
+  it('throws on non-finite maxAge', () => {
+    expect(() => serializeCookie('sid', 'v', { maxAge: Number.POSITIVE_INFINITY })).toThrow(
+      /Max-Age/,
+    );
+    expect(() => serializeCookie('sid', 'v', { maxAge: Number.NEGATIVE_INFINITY })).toThrow(
+      /Max-Age/,
+    );
+  });
+
+  it('accepts maxAge 0 (the clearCookie form)', () => {
+    expect(serializeCookie('sid', '', { maxAge: 0 })).toBe('sid=; Max-Age=0');
+  });
+
+  it('throws on an invalid Date instead of shipping Expires=Invalid Date', () => {
+    expect(() => serializeCookie('sid', 'v', { expires: new Date('bogus') })).toThrow(/Expires/);
+  });
+});

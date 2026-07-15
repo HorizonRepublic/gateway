@@ -47,8 +47,11 @@ type NATSKVStoreConfig struct {
 	// than the GCRA tokens-to-fill time for the slowest expected
 	// route (otherwise legitimate callers see the fresh-bucket path
 	// after a quiet period), but small enough that a one-off spike
-	// does not leak state for days. Zero value disables TTL — not
-	// recommended for production.
+	// does not leak state for days. MUST be > 0 in production wiring:
+	// config validation rejects RATELIMIT_KEY_TTL <= 0 at startup, and
+	// the memory backend rejects a non-positive TTL at construction —
+	// a zero MaxAge (JetStream's "never expire") is not a supported
+	// configuration for rate-limit state.
 	KeyTTL time.Duration
 
 	// Logger is plumbed into breaker state-change logs and the

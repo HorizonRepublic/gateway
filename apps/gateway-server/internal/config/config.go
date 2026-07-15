@@ -289,6 +289,11 @@ type Config struct {
 	//   - nats-kv — bucket MaxAge; keys are reaped after this duration
 	//               regardless of activity. Raise the value to preserve
 	//               state longer across traffic gaps.
+	//
+	// MUST be > 0; Load() rejects zero and negative values. Zero is
+	// NOT "disable expiry" for either backend — on the memory backend
+	// it would place the sweep cutoff at "now" and silently reset
+	// every bucket each sweeper tick.
 	RateLimitKeyTTL time.Duration `env:"RATELIMIT_KEY_TTL" envDefault:"10m"`
 
 	// RateLimitTimeout bounds the wall-clock budget the rate-limit
@@ -415,6 +420,16 @@ func Load() (*Config, error) {
 
 	if cfg.RateLimitTimeout <= 0 || cfg.RateLimitTimeout > time.Second {
 		return nil, fmt.Errorf("RATELIMIT_TIMEOUT must be > 0 and ≤ 1s, got %s", cfg.RateLimitTimeout)
+	}
+
+	// A zero or negative TTL is never "disable expiry": the memory
+	// backend would compute its sweep cutoff at or beyond "now" and
+	// reap every bucket on every tick, silently resetting all keys to
+	// full burst each second — a fail-open with no log line. Rejecting
+	// at Load keeps both backends on the same contract and surfaces
+	// the misconfiguration at startup instead of in production traffic.
+	if cfg.RateLimitKeyTTL <= 0 {
+		return nil, fmt.Errorf("RATELIMIT_KEY_TTL must be > 0, got %s", cfg.RateLimitKeyTTL)
 	}
 
 	if cfg.RateLimitMemoryMaxEntries < 0 {

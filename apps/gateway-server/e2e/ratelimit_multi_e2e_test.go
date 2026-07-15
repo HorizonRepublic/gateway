@@ -35,14 +35,15 @@ func TestE2E_RateLimitMulti_NatsKVSharedAcrossReplicas(t *testing.T) {
 	// (route, IP); a fresh IP guarantees a fresh TAT in JetStream KV.
 	const ip = "10.99.50.1"
 
-	// Exhaust the budget on replica A: rps=1, burst=1 ⇒ 3 hits = [200, 200, 429].
+	// Exhaust the budget on replica A: rps=1, burst=1 ⇒ 3 hits = [200, 429, 429]
+	// (canonical GCRA: burst=1 admits exactly one before the rate gate).
 	statusesA := make([]int, 3)
 	for i := 0; i < 3; i++ {
 		resp := rateLimitGetAt(t, GatewayURL(t), "/rl/multi-natskv", ip)
 		statusesA[i] = resp.StatusCode
 		drainBody(resp)
 	}
-	require.Equal(t, []int{http.StatusOK, http.StatusOK, http.StatusTooManyRequests}, statusesA,
+	require.Equal(t, []int{http.StatusOK, http.StatusTooManyRequests, http.StatusTooManyRequests}, statusesA,
 		"replica A must produce the standard burst-then-reject sequence on the natskv route")
 
 	// One more hit on replica B with the same IP. Memory store would
@@ -69,7 +70,7 @@ func TestE2E_RateLimitMulti_MemoryIndependentAcrossReplicas(t *testing.T) {
 		statusesA[i] = resp.StatusCode
 		drainBody(resp)
 	}
-	require.Equal(t, []int{http.StatusOK, http.StatusOK, http.StatusTooManyRequests}, statusesA,
+	require.Equal(t, []int{http.StatusOK, http.StatusTooManyRequests, http.StatusTooManyRequests}, statusesA,
 		"replica A memory bucket must follow the standard burst-then-reject sequence")
 
 	// One hit on replica B with the same IP. Memory state is per-process;

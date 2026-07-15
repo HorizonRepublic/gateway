@@ -5,9 +5,10 @@
  * All fields are optional — omitting a field omits the corresponding attribute
  * from the serialized `Set-Cookie` header value. The gateway SDK serializes
  * these locally via a small helper; no `cookie` npm dependency is required.
- * The helper expects values to already be wire-safe (no control characters
- * in `value`, no CRLF in `domain` / `path`); callers that accept
- * user-controlled input must sanitize upstream.
+ * The cookie name and value are percent-encoded on the way out; `domain` and
+ * `path` are validated against the rfc6265bis attribute grammar at
+ * serialization time and a violation throws, so user-controlled input can
+ * never inject additional cookie attributes into the header line.
  */
 export interface ICookieOptions {
   /**

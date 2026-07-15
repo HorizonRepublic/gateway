@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -109,6 +110,142 @@ func TestRouter_EnsureBackendFactoryError(t *testing.T) {
 	r := NewRouter(FailPolicyOpen.Resolve(), zerolog.Nop())
 	err := r.EnsureBackend("nats-kv", func() (Store, error) { return nil, errors.New("boom") })
 	assert.Error(t, err)
+}
+
+// closeCountingStore records Close invocations so tests can assert
+// the loser-cleanup contract of concurrent EnsureBackend calls.
+type closeCountingStore struct {
+	stubStore
+	closes atomic.Int32
+}
+
+func (s *closeCountingStore) Close() error {
+	s.closes.Add(1)
+	return nil
+}
+
+// TestRouter_EnsureBackendDoesNotBlockStoreFor pins the hot-path
+// isolation contract: a slow backend factory (NewNATSKVStore performs
+// several JetStream round trips) MUST NOT stall StoreFor, which every
+// rate-limited request calls. The regression this guards: factory ran
+// under the exclusive router mutex, so a degraded JetStream turned
+// every registry delta and 30s retry tick into a multi-second full
+// stall of rate-limited traffic.
+func TestRouter_EnsureBackendDoesNotBlockStoreFor(t *testing.T) {
+	mem := NewMemoryStore(time.Minute)
+	defer func() { _ = mem.Close() }()
+
+	r := NewRouter(FailPolicyOpen.Resolve(), zerolog.Nop())
+	require.NoError(t, r.EnsureBackend("memory", func() (Store, error) { return mem, nil }))
+
+	factoryEntered := make(chan struct{})
+	factoryRelease := make(chan struct{})
+	ensureDone := make(chan error, 1)
+	go func() {
+		ensureDone <- r.EnsureBackend("nats-kv", func() (Store, error) {
+			close(factoryEntered)
+			<-factoryRelease
+			return &stubStore{name: "nats-kv"}, nil
+		})
+	}()
+
+	<-factoryEntered
+
+	// With the factory parked mid-registration, the request hot path
+	// must stay responsive.
+	storeForDone := make(chan Store, 1)
+	go func() {
+		storeForDone <- r.StoreFor(routing.Route{RateLimit: &registry.RateLimitMeta{Store: "memory"}})
+	}()
+
+	select {
+	case s := <-storeForDone:
+		assert.Same(t, mem, s)
+	case <-time.After(2 * time.Second):
+		t.Fatal("StoreFor blocked behind an in-flight EnsureBackend factory")
+	}
+
+	close(factoryRelease)
+	require.NoError(t, <-ensureDone)
+
+	got := r.StoreFor(routing.Route{RateLimit: &registry.RateLimitMeta{Store: "nats-kv"}})
+	_, isStub := got.(*stubStore)
+	assert.True(t, isStub, "the factory's store must be registered once released")
+}
+
+// TestRouter_EnsureBackendConcurrentDuplicatesClosed pins the
+// lost-race cleanup: when two callers race EnsureBackend for the same
+// id (watcher delta vs 30s retry tick), exactly one store lands in the
+// map and every surplus store is Closed so no backend connection
+// leaks.
+func TestRouter_EnsureBackendConcurrentDuplicatesClosed(t *testing.T) {
+	r := NewRouter(FailPolicyOpen.Resolve(), zerolog.Nop())
+
+	const callers = 8
+	stores := make([]*closeCountingStore, callers)
+	var builds atomic.Int32
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < callers; i++ {
+		i := i
+		stores[i] = &closeCountingStore{}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			assert.NoError(t, r.EnsureBackend("nats-kv", func() (Store, error) {
+				builds.Add(1)
+				return stores[i], nil
+			}))
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	winner := r.StoreFor(routing.Route{RateLimit: &registry.RateLimitMeta{Store: "nats-kv"}})
+
+	var registered int
+	var totalCloses int32
+	for _, s := range stores {
+		if s == winner {
+			registered++
+			assert.Zero(t, s.closes.Load(), "the registered store must not be closed")
+			continue
+		}
+		totalCloses += s.closes.Load()
+	}
+	assert.Equal(t, 1, registered, "exactly one racing store must win registration")
+	assert.Equal(t, builds.Load()-1, totalCloses,
+		"every store built by a losing factory must be closed exactly once")
+}
+
+// TestRouter_EnsureBackendCloseDuringFactory pins the shutdown race:
+// a router Close()d while a factory is in flight must refuse the late
+// registration with ErrStoreClosed and close the freshly built store
+// so it does not leak past shutdown.
+func TestRouter_EnsureBackendCloseDuringFactory(t *testing.T) {
+	r := NewRouter(FailPolicyOpen.Resolve(), zerolog.Nop())
+
+	late := &closeCountingStore{}
+	factoryEntered := make(chan struct{})
+	factoryRelease := make(chan struct{})
+	ensureDone := make(chan error, 1)
+	go func() {
+		ensureDone <- r.EnsureBackend("nats-kv", func() (Store, error) {
+			close(factoryEntered)
+			<-factoryRelease
+			return late, nil
+		})
+	}()
+
+	<-factoryEntered
+	require.NoError(t, r.Close())
+	close(factoryRelease)
+
+	err := <-ensureDone
+	assert.ErrorIs(t, err, ErrStoreClosed)
+	assert.Equal(t, int32(1), late.closes.Load(),
+		"a store built after shutdown must be closed, not leaked")
 }
 
 // TestRouter_StoreForAfterCloseReturnsClosedSentinel guards the race

@@ -252,6 +252,32 @@ func TestLoad_RateLimitCustomKeyTTL(t *testing.T) {
 	assert.Equal(t, 2*time.Minute, cfg.RateLimitKeyTTL)
 }
 
+// TestLoad_RateLimitKeyTTLRejectsNonPositive pins the startup guard
+// against the silent fail-open a non-positive TTL used to cause: the
+// memory backend's sweep cutoff landed at or beyond "now" and every
+// bucket was reaped each tick, restoring full burst to every key once
+// a second with no log line. Zero is NOT "disable expiry" for either
+// backend; the misconfiguration must abort startup.
+func TestLoad_RateLimitKeyTTLRejectsNonPositive(t *testing.T) {
+	t.Run("zero is rejected", func(t *testing.T) {
+		setRequiredEnv(t)
+		t.Setenv("RATELIMIT_KEY_TTL", "0s")
+
+		_, err := Load()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "RATELIMIT_KEY_TTL")
+	})
+
+	t.Run("negative is rejected", func(t *testing.T) {
+		setRequiredEnv(t)
+		t.Setenv("RATELIMIT_KEY_TTL", "-1m")
+
+		_, err := Load()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "RATELIMIT_KEY_TTL")
+	})
+}
+
 // TestLoad_KVBucketRequired guards the production-safety contract that
 // KV_BUCKET MUST be set explicitly. caarlos0/env treats explicit-empty
 // as unset and would silently apply a default — risking cross-env data

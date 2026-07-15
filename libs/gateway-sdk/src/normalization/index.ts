@@ -8,6 +8,8 @@ export { DefaultErrorBodyFactory } from './default-error-body.factory';
 
 export { assertCorsCredentialsNotWildcard } from './cors-validator';
 
+export { DEFAULT_CORS_ALLOWED_HEADERS, withDefaultCorsHeaders } from './cors-defaults';
+
 export { assertRateLimitConfig } from './rate-limit-validator';
 
 export { parseCookies } from './cookie-parser';
