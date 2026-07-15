@@ -112,32 +112,45 @@ func NewRouter(failPolicy Policy, logger zerolog.Logger) *Router {
 }
 
 // EnsureBackend registers a Store for the given id if one is not
-// already present. factory runs exactly once per id on success — once
-// a backend is in the map, subsequent calls for the same id are
-// no-ops so the watcher hot-reload path can re-scan the registry on
-// every delta without duplicate instantiation or side effects.
+// already present. Once a backend is in the map, subsequent calls for
+// the same id are no-ops so the watcher hot-reload path can re-scan
+// the registry on every delta without duplicate instantiation or side
+// effects.
+//
+// factory runs OUTSIDE the router mutex. Backend construction can
+// involve multiple network round trips (the NATS-KV factory opens and
+// possibly creates a JetStream bucket); holding the exclusive lock
+// across that I/O would stall StoreFor — and with it every
+// rate-limited request — for the whole factory duration, precisely
+// while the backend is degraded. The trade-off is double-checked
+// registration: two callers racing the same unregistered id may both
+// invoke factory, in which case the first result to reach the map
+// wins and every surplus store is Close()d before the loser returns
+// nil. Callers that need strict once-only factory semantics MUST
+// serialize externally.
 //
 // If factory returns an error the router is left untouched and the
-// error is propagated verbatim. The next EnsureBackend call for the
+// error is propagated wrapped. The next EnsureBackend call for the
 // same id will retry the factory because nothing was registered on
 // the failed attempt; the API does not memoise failures. Callers that
-// need retry-with-backoff or once-only semantics on failure MUST wrap
-// the factory themselves.
+// need retry-with-backoff on failure MUST wrap the factory themselves.
 //
-// Returns ErrStoreClosed if the router has already been Close()d;
-// factory is not invoked in that case so no resources leak after
-// shutdown.
+// Returns ErrStoreClosed if the router has already been Close()d.
+// When shutdown lands while factory is in flight, the late-built
+// store is Close()d before ErrStoreClosed is returned so no backend
+// connection leaks past shutdown.
 //
 // Safe for concurrent use alongside StoreFor.
 func (r *Router) EnsureBackend(id string, factory func() (Store, error)) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.mu.RLock()
+	closed := r.closed
+	_, exists := r.stores[id]
+	r.mu.RUnlock()
 
-	if r.closed {
+	if closed {
 		return ErrStoreClosed
 	}
-
-	if _, ok := r.stores[id]; ok {
+	if exists {
 		return nil
 	}
 
@@ -146,8 +159,36 @@ func (r *Router) EnsureBackend(id string, factory func() (Store, error)) error {
 		return fmt.Errorf("ratelimit: register backend %q: %w", id, err)
 	}
 
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.closed {
+		r.closeSurplusStore(id, s, "router closed during factory")
+		return ErrStoreClosed
+	}
+
+	if _, ok := r.stores[id]; ok {
+		r.closeSurplusStore(id, s, "lost registration race")
+		return nil
+	}
+
 	r.stores[id] = s
 	return nil
+}
+
+// closeSurplusStore disposes of a store that was built but will never
+// be registered (lost a registration race or arrived after shutdown).
+// A Close failure cannot change the caller's outcome — the store is
+// unreachable either way — so it is logged rather than propagated.
+func (r *Router) closeSurplusStore(id string, s Store, reason string) {
+	if err := s.Close(); err != nil {
+		r.logger.Warn().
+			Str("event", "ratelimit.store.surplus_close_failed").
+			Str("backend", id).
+			Str("reason", reason).
+			Err(err).
+			Msg("failed to close surplus rate-limit store")
+	}
 }
 
 // StoreFor returns the Store that should service the given route.

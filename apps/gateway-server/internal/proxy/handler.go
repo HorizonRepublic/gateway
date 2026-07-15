@@ -15,6 +15,7 @@ import (
 
 	"github.com/HorizonRepublic/gateway/apps/gateway-server/internal/codec"
 	gerrors "github.com/HorizonRepublic/gateway/apps/gateway-server/internal/errors"
+	"github.com/HorizonRepublic/gateway/apps/gateway-server/internal/observability"
 	"github.com/HorizonRepublic/gateway/apps/gateway-server/internal/ratelimit"
 	"github.com/HorizonRepublic/gateway/apps/gateway-server/internal/registry"
 	"github.com/HorizonRepublic/gateway/apps/gateway-server/internal/routing"
@@ -54,6 +55,18 @@ type HandlerConfig struct {
 	// but production bootstrap MUST set a distinct, shorter budget
 	// (default 50ms per the cfg.RateLimitTimeout env knob).
 	RateLimitTimeout time.Duration
+	// Metrics receives the RED observation and in-flight gauge bumps
+	// for every request. nil disables metrics collection entirely —
+	// the handler then skips the timing wrapper's metric calls, which
+	// keeps legacy test harnesses and benchmark fixtures working
+	// without a registry.
+	Metrics *observability.Metrics
+	// AccessLog enables the single structured completion event per
+	// request (event=http.access). Wired from ACCESS_LOG_ENABLED;
+	// defaults to true in production bootstrap. The event is emitted
+	// at INFO on cfg.Logger, so LOG_LEVEL=warn silences it without a
+	// separate knob.
+	AccessLog bool
 }
 
 // Handler is the HTTP→NATS→HTTP orchestrator. It owns one request from
@@ -121,10 +134,104 @@ type ServeResult struct {
 	GatewayOwnedBody bool
 }
 
+// requestOutcome accumulates the per-request facts the observability
+// wrapper needs after serve returns: the matched route template (or
+// an unmatched/preflight sentinel), the NATS subject, and the auth /
+// rate-limit gate outcomes. Lives on Handle's stack — no allocation.
+type requestOutcome struct {
+	route     string
+	subject   string
+	auth      string
+	rateLimit string
+}
+
+// Outcome label values for the auth and rate-limit gates. Closed
+// sets: both fields feed the access log, and a bounded vocabulary is
+// what makes the log queryable ("all fail-open decisions last hour")
+// instead of free-text.
+const (
+	// outcomeNone marks a gate that was not configured for the route.
+	outcomeNone = "none"
+	// outcomeOK marks a verifier 200 whose claims travel on the envelope.
+	outcomeOK = "ok"
+	// outcomeAnonymous marks an optional-auth route whose verifier
+	// replied 401 — the request proceeded without claims.
+	outcomeAnonymous = "anonymous"
+	// outcomeDenied marks a verifier 4xx short-circuit (401/403/...).
+	outcomeDenied = "denied"
+	// outcomeError marks a gate that failed for infrastructure
+	// reasons: verifier transport/decode failure, or a rate-limit
+	// store error that FailPolicy resolved to reject.
+	outcomeError = "error"
+	// outcomeAllowed marks a healthy rate-limit pass.
+	outcomeAllowed = "allowed"
+	// outcomeRejected marks a 429 — bucket empty under a healthy backend.
+	outcomeRejected = "rejected"
+	// outcomeFailOpen marks a store/claims failure that FailPolicy
+	// resolved to allow — enforcement was degraded for this request.
+	outcomeFailOpen = "fail_open"
+)
+
 // Handle performs the full request lifecycle: route lookup, envelope
 // encode, NATS request, reply decode, response construction. Errors
 // are translated to the appropriate HTTP status with a pre-encoded
 // JSON error body from the internal/errors package.
+//
+// Handle is the observability wrapper around serve: it times the
+// request, maintains the in-flight gauge, records the RED metrics,
+// and emits the single structured access-log event at completion.
+// When both surfaces are disabled (nil Metrics, AccessLog false) it
+// delegates straight to serve so legacy harnesses pay nothing.
+func (h *Handler) Handle(ctx context.Context, in *ServeInput) *ServeResult {
+	obs := requestOutcome{
+		route:     observability.RouteUnmatched,
+		auth:      outcomeNone,
+		rateLimit: outcomeNone,
+	}
+
+	if h.cfg.Metrics == nil && !h.cfg.AccessLog {
+		return h.serve(ctx, in, &obs)
+	}
+
+	if h.cfg.Metrics != nil {
+		h.cfg.Metrics.HTTPRequestStarted()
+	}
+
+	start := time.Now()
+	result := h.serve(ctx, in, &obs)
+	elapsed := time.Since(start)
+
+	if h.cfg.Metrics != nil {
+		h.cfg.Metrics.HTTPRequestFinished()
+		h.cfg.Metrics.ObserveHTTPRequest(in.Method, obs.route, result.Status, elapsed.Seconds())
+	}
+
+	if h.cfg.AccessLog {
+		// Exactly one completion event per request. Fields reuse
+		// values already resolved upstream (trusted-proxy client IP,
+		// adapter-minted request id) — nothing is re-derived here.
+		h.cfg.Logger.Info().
+			Str("event", "http.access").
+			Str("method", in.Method).
+			Str("route", obs.route).
+			Int("status", result.Status).
+			Float64("duration_ms", float64(elapsed.Nanoseconds())/1e6).
+			Int("bytes_out", len(result.Body)).
+			Str("client_ip", in.RemoteAddr).
+			Str("request_id", in.RequestID).
+			Str("subject", obs.subject).
+			Str("auth", obs.auth).
+			Str("ratelimit", obs.rateLimit).
+			Msg("request completed")
+	}
+
+	return result
+}
+
+// serve owns the request lifecycle proper. It mutates obs as facts
+// become known (route match, auth outcome, rate-limit outcome) so the
+// Handle wrapper can observe them after the response is built without
+// re-deriving anything.
 //
 // The ctx argument is the inbound HTTP request's context. It is
 // propagated into every blocking dependency call (rate-limit store,
@@ -144,7 +251,7 @@ type ServeResult struct {
 // referenced by NATS and is safe to reuse. Any future refactor that
 // keeps the payload slice alive beyond this function MUST stop using
 // the pool.
-func (h *Handler) Handle(ctx context.Context, in *ServeInput) *ServeResult {
+func (h *Handler) serve(ctx context.Context, in *ServeInput, obs *requestOutcome) *ServeResult {
 	table := h.cfg.Table()
 
 	// A CORS preflight is an OPTIONS request carrying an
@@ -155,6 +262,7 @@ func (h *Handler) Handle(ctx context.Context, in *ServeInput) *ServeResult {
 	// reachable, and plain OPTIONS to a non-OPTIONS route follows the
 	// standard 404/405 semantics.
 	if in.Method == "OPTIONS" && in.Headers["access-control-request-method"] != "" {
+		obs.route = observability.RoutePreflight
 		return h.handlePreflight(table, in)
 	}
 
@@ -171,6 +279,9 @@ func (h *Handler) Handle(ctx context.Context, in *ServeInput) *ServeResult {
 	}
 
 	origin := in.Headers["origin"]
+
+	obs.route = route.PathTemplate
+	obs.subject = route.Subject
 
 	// Intake guard: the request envelope is one JSON document
 	// (RFC 8259 §2), so a non-JSON inbound body can never be
@@ -230,36 +341,23 @@ func (h *Handler) Handle(ctx context.Context, in *ServeInput) *ServeResult {
 	claimsKeyed := rateLimitNeedsClaims(route)
 	if !claimsKeyed {
 		var rlShortCircuit *ServeResult
-		rlHeaders, rlShortCircuit = h.applyRateLimitGate(ctx, route, in, nil, time.Until(deadline))
+		rlHeaders, rlShortCircuit = h.applyRateLimitGate(ctx, route, in, nil, time.Until(deadline), obs)
 		if rlShortCircuit != nil {
 			return stampCORSOnResult(rlShortCircuit, route.CORS, origin)
 		}
 	}
 
-	routeHeaders := in.Headers
-	if route.Auth != nil {
-		authOutcome := h.runAuthFlow(ctx, in, route, params, time.Until(deadline))
-		if !authOutcome.Proceed {
-			result := mergeRateLimitHeaders(authOutcome.ShortCircuit, rlHeaders)
-			return stampCORSOnResult(result, route.CORS, origin)
-		}
-
-		claims = authOutcome.Claims
-		authHeaders = authOutcome.AuthHeaders
-		// Once the verifier has decoded the bearer token into
-		// structured claims, the raw credentials MUST NOT travel onto
-		// the route envelope. The claims are the contract the route
-		// handler consumes; forwarding the token alongside them lets
-		// any downstream service bypass the verifier (re-decode,
-		// store, replay) and silently breaks rotation, blacklists,
-		// and revocation. Cookie-auth is left untouched because
-		// cookie-auth is not yet wired through the verifier path.
-		routeHeaders = stripAuthHeaders(in.Headers)
+	authStage := h.applyAuthStage(ctx, in, route, params, deadline, rlHeaders, origin, obs)
+	if authStage.ShortCircuit != nil {
+		return authStage.ShortCircuit
 	}
+	claims = authStage.Claims
+	authHeaders = authStage.AuthHeaders
+	routeHeaders := authStage.RouteHeaders
 
 	if claimsKeyed {
 		var rlShortCircuit *ServeResult
-		rlHeaders, rlShortCircuit = h.applyRateLimitGate(ctx, route, in, claims, time.Until(deadline))
+		rlHeaders, rlShortCircuit = h.applyRateLimitGate(ctx, route, in, claims, time.Until(deadline), obs)
 		if rlShortCircuit != nil {
 			return stampCORSOnResult(rlShortCircuit, route.CORS, origin)
 		}
@@ -359,6 +457,84 @@ func (h *Handler) Handle(ctx context.Context, in *ServeInput) *ServeResult {
 		Status:  reply.Status,
 		Headers: mergedHeaders,
 		Body:    reply.Body,
+	}
+}
+
+// authStageResult carries the auth-stage outputs back to serve.
+// Exactly one shape is populated:
+//
+//   - ShortCircuit non-nil → the verifier denied the request or the
+//     verifier round trip itself failed; serve returns it verbatim.
+//     The result is already merged with the rate-limit headers and
+//     CORS-stamped, so serve does not re-touch it.
+//   - ShortCircuit nil → the request proceeds. Claims carries the
+//     verifier's decoded body for the main envelope's auth field (nil
+//     on a public route or an optional-auth 401 swallow), AuthHeaders
+//     carries verifier response headers for the reply merge, and
+//     RouteHeaders is the header set forwarded to the main leg
+//     (credential-stripped once claims were decoded).
+type authStageResult struct {
+	ShortCircuit *ServeResult
+	Claims       json.RawMessage
+	AuthHeaders  map[string][]string
+	RouteHeaders map[string]string
+}
+
+// applyAuthStage runs the verifier flow for a protected route and folds
+// its outcome into the observability record (obs.auth). A public route
+// (no Auth block) is a no-op that echoes the inbound headers as the
+// route headers. The deadline is the shared per-request budget anchor;
+// the verifier leg draws its remaining slice from it.
+//
+// Extracted from serve so the obs.auth accounting lives next to the
+// decision that produces it while keeping serve within its
+// cognitive-complexity budget — the same decomposition applied to
+// runAuthFlow and applyRateLimitGate.
+func (h *Handler) applyAuthStage(
+	ctx context.Context,
+	in *ServeInput,
+	route routing.Route,
+	params map[string]string,
+	deadline time.Time,
+	rlHeaders map[string]string,
+	origin string,
+	obs *requestOutcome,
+) authStageResult {
+	if route.Auth == nil {
+		return authStageResult{RouteHeaders: in.Headers}
+	}
+
+	authOutcome := h.runAuthFlow(ctx, in, route, params, time.Until(deadline))
+	if !authOutcome.Proceed {
+		// 4xx short-circuits are verifier denials; 5xx means the
+		// verifier round trip itself failed (transport, decode).
+		obs.auth = outcomeDenied
+		if authOutcome.ShortCircuit.Status >= 500 {
+			obs.auth = outcomeError
+		}
+
+		result := mergeRateLimitHeaders(authOutcome.ShortCircuit, rlHeaders)
+
+		return authStageResult{ShortCircuit: stampCORSOnResult(result, route.CORS, origin)}
+	}
+
+	obs.auth = outcomeOK
+	if authOutcome.Claims == nil {
+		obs.auth = outcomeAnonymous
+	}
+
+	// Once the verifier has decoded the bearer token into structured
+	// claims, the raw credentials MUST NOT travel onto the route
+	// envelope. The claims are the contract the route handler consumes;
+	// forwarding the token alongside them lets any downstream service
+	// bypass the verifier (re-decode, store, replay) and silently
+	// breaks rotation, blacklists, and revocation. Cookie-auth is left
+	// untouched because cookie-auth is not yet wired through the
+	// verifier path.
+	return authStageResult{
+		Claims:       authOutcome.Claims,
+		AuthHeaders:  authOutcome.AuthHeaders,
+		RouteHeaders: stripAuthHeaders(in.Headers),
 	}
 }
 
@@ -527,6 +703,7 @@ func (h *Handler) applyRateLimitGate(
 	in *ServeInput,
 	claims json.RawMessage,
 	timeout time.Duration,
+	obs *requestOutcome,
 ) (map[string]string, *ServeResult) {
 	if route.RateLimit == nil || route.RateLimit.RPS <= 0 || h.cfg.RateLimiter == nil {
 		return nil, nil
@@ -563,6 +740,7 @@ func (h *Handler) applyRateLimitGate(
 
 		rlHeaders := ratelimit.BuildHeaders(route.RateLimit, ratelimit.Decision{})
 		if !allowed {
+			obs.rateLimit = outcomeError
 			result := toServeResult(gerrors.ServiceUnavailable)
 			for k, v := range rlHeaders {
 				result.Headers[k] = []string{v}
@@ -609,6 +787,21 @@ func (h *Handler) applyRateLimitGate(
 		// Reset: -62135596800 to clients on the fail-open branch.
 		decision = ratelimit.Decision{}
 		allowed = h.failPolicyFor(route).Apply(rlErr, route, fullKey, h.requestLogger(in, &route))
+	}
+
+	// Outcome accounting for the access log: a clean decision maps to
+	// allowed/rejected; a store error maps to fail_open (FailPolicy
+	// let the request through with degraded enforcement) or error
+	// (FailPolicy rejected on the gateway's behalf).
+	switch {
+	case rlErr == nil && allowed:
+		obs.rateLimit = outcomeAllowed
+	case rlErr == nil:
+		obs.rateLimit = outcomeRejected
+	case allowed:
+		obs.rateLimit = outcomeFailOpen
+	default:
+		obs.rateLimit = outcomeError
 	}
 
 	rlHeaders := ratelimit.BuildHeaders(route.RateLimit, decision)
@@ -793,6 +986,14 @@ func stripAuthHeaders(in map[string]string) map[string]string {
 // `session="abc"`, and `session= abc` all collapse to "abc". Without
 // this normalisation, equivalent cookies would land in distinct
 // rate-limit buckets.
+//
+// The cookie NAME is trimmed of surrounding whitespace before the
+// comparison (RFC 6265bis cookie-string parsing removes leading and
+// trailing WSP from the name string), so `session =abc` resolves the
+// same way on the SDK and gateway sides. Pairs without "=" (or with
+// nothing before it) are nameless cookies under the same parsing
+// rules and never match a named lookup; the SDK's parseCookies skips
+// them identically.
 func extractCookie(headers map[string]string, name string) (string, bool) {
 	cookieHeader := headers["cookie"]
 	if cookieHeader == "" {
@@ -808,7 +1009,7 @@ func extractCookie(headers map[string]string, name string) (string, bool) {
 	for _, part := range strings.Split(cookieHeader, ";") {
 		part = strings.TrimSpace(part)
 		eqIdx := strings.IndexByte(part, '=')
-		if eqIdx <= 0 || part[:eqIdx] != name {
+		if eqIdx <= 0 || strings.TrimSpace(part[:eqIdx]) != name {
 			continue
 		}
 

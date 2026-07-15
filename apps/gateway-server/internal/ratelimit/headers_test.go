@@ -49,6 +49,30 @@ func TestBuildHeaders_LimitReportsRPSNotBurst(t *testing.T) {
 	assert.Equal(t, "100", h["X-RateLimit-Limit"])
 }
 
+// TestBuildHeaders_RemainingClampedToLimit pins the countdown
+// invariant of the de-facto X-RateLimit-* convention: Remaining never
+// exceeds Limit. Decision.Remaining counts burst slots, which with the
+// default burst = 2×RPS would otherwise put Remaining: 199 next to
+// Limit: 100 on a cold bucket — nonsense for any client computing
+// used = limit - remaining. The clamp under-reports available burst
+// (the safe direction: clients may back off early, never get a
+// surprise 429) while low readings — the ones adaptive throttlers act
+// on — stay exact.
+func TestBuildHeaders_RemainingClampedToLimit(t *testing.T) {
+	d := Decision{Allowed: true, Remaining: 199, ResetAt: time.Unix(1_000_000_000, 0)}
+	rl := &registry.RateLimitMeta{RPS: 100, Burst: 200}
+
+	h := BuildHeaders(rl, d)
+	assert.Equal(t, "100", h["X-RateLimit-Limit"])
+	assert.Equal(t, "100", h["X-RateLimit-Remaining"],
+		"Remaining above the advertised Limit must clamp to it")
+
+	// Below the limit the exact burst-slot count passes through.
+	d.Remaining = 42
+	h = BuildHeaders(rl, d)
+	assert.Equal(t, "42", h["X-RateLimit-Remaining"])
+}
+
 // TestBuildHeaders_ZeroDecisionEmitsOnlyLimit pins the fail-open
 // defence: when Store.Allow errors out and the configured FailPolicy
 // resolves to "allow", the handler passes a zero Decision{} into

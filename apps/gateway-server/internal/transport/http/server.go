@@ -2,13 +2,17 @@ package http
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
+	"net"
+	"net/http"
+	"net/http/pprof"
+	"sync/atomic"
+	"time"
 
-	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/app/server"
 	hertzconfig "github.com/cloudwego/hertz/pkg/common/config"
-	"github.com/cloudwego/hertz/pkg/protocol/consts"
 	"github.com/rs/zerolog"
 
 	"github.com/HorizonRepublic/gateway/apps/gateway-server/internal/config"
@@ -173,40 +177,130 @@ func NewServer(
 	return h, nil
 }
 
-// NewOperatorServer constructs the operator-only Hertz engine: the
-// listener for surfaces that belong to the platform operator, never
-// to public clients — health probes today; metrics scrape, pprof,
-// admin endpoints (e.g. the dynamic IP blocklist) tomorrow. Binding
-// them to a separate port (OPERATOR_HTTP_ADDR, default :8081) keeps
-// the trust boundary structural: in Kubernetes the operator port is
+// operatorReadHeaderTimeout bounds how long the operator listener
+// waits for request headers. The listener is reachable from the pod
+// network, so a slowloris-shaped defence is still warranted even
+// though clients are supposed to be the kubelet and Prometheus.
+const operatorReadHeaderTimeout = 10 * time.Second
+
+// OperatorServer is the operator-only listener: the surfaces that
+// belong to the platform operator, never to public clients — health
+// probes, the Prometheus scrape endpoint, and pprof. Binding them to
+// a separate port (OPERATOR_HTTP_ADDR, default :8081) keeps the
+// trust boundary structural: in Kubernetes the operator port is
 // reachable by the kubelet and the pod network but is simply never
-// exposed through the public Service/Ingress, so a future operator
+// exposed through the public Service/Ingress, so every operator
 // endpoint is private BY DEFAULT instead of "private if someone
 // remembers to mount auth".
 //
-// The engine is deliberately minimal: no trusted-proxy middleware
+// The listener is plain net/http rather than Hertz: both promhttp and
+// net/http/pprof are stdlib http.Handler surfaces, the traffic is a
+// handful of requests per second at most, and skipping the framework
+// adaptor keeps the debug path independent of the machinery it is
+// meant to debug — a Hertz-level incident must not take the pprof
+// endpoint down with it.
+type OperatorServer struct {
+	srv *http.Server
+	// boundAddr publishes the listener's actual address once Run has
+	// bound the socket. Lets tests (and future tooling) target an
+	// ephemeral ":0" port deterministically instead of racing a
+	// pre-picked free port.
+	boundAddr atomic.Value
+}
+
+// Compile-time proof the operator server satisfies the lifecycle
+// drain contract alongside the Hertz public server.
+var _ interface {
+	Shutdown(ctx context.Context) error
+} = (*OperatorServer)(nil)
+
+// NewOperatorServer constructs the operator listener serving:
+//
+//   - /healthz          — K8s liveness probe (unconditional 200).
+//   - /readyz           — K8s readiness probe via ReadinessSignal.
+//   - /metrics          — Prometheus scrape handler (when non-nil).
+//   - /debug/pprof/...  — net/http/pprof profiling endpoints.
+//
+// pprof handlers are registered on this private mux explicitly —
+// NEVER on the public listener. The net/http/pprof import also
+// self-registers on http.DefaultServeMux as an import side effect,
+// but the gateway never serves DefaultServeMux, so that registration
+// is inert.
+//
+// The mux is deliberately minimal: no trusted-proxy middleware
 // (probes come from the kubelet, not through the proxy chain), no
 // concurrency limiter (a saturated gateway must still answer probes,
-// or K8s restarts it mid-incident), no body/header guards (probe
-// requests carry no payload). ExitWaitTime mirrors the public server
-// so one SHUTDOWN_TIMEOUT knob governs both drains.
+// or K8s restarts it mid-incident), no body guards (operator
+// requests carry no payload). No write timeout is set because CPU
+// and trace profiles stream for a caller-chosen number of seconds;
+// the header-read timeout above still bounds slow-header abuse.
 //
-// Like NewServer, the returned engine is NOT started.
+// Like NewServer, the returned server is NOT started — call Run.
 func NewOperatorServer(
 	cfg *config.Config,
 	readiness ReadinessSignal,
-) *server.Hertz {
-	h := server.Default(
-		server.WithHostPorts(cfg.OperatorHTTPAddr),
-		server.WithExitWaitTime(cfg.ShutdownTimeout),
-		server.WithKeepAlive(true),
-		withNoDefaultServerHeader(),
-	)
+	metrics http.Handler,
+) *OperatorServer {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", liveHandler())
+	mux.HandleFunc("/readyz", readyHandler(readiness))
 
-	h.GET("/healthz", liveHandler())
-	h.GET("/readyz", readyHandler(readiness))
+	if metrics != nil {
+		mux.Handle("/metrics", metrics)
+	}
 
-	return h
+	mux.HandleFunc("/debug/pprof/", pprof.Index)
+	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+
+	return &OperatorServer{
+		srv: &http.Server{
+			Addr:              cfg.OperatorHTTPAddr,
+			Handler:           mux,
+			ReadHeaderTimeout: operatorReadHeaderTimeout,
+		},
+	}
+}
+
+// Run binds the configured address and serves until Shutdown is
+// called. A clean Shutdown-driven exit returns nil so the bootstrap's
+// "server exited unexpectedly" log fires only for genuine failures.
+func (s *OperatorServer) Run() error {
+	ln, err := net.Listen("tcp", s.srv.Addr)
+	if err != nil {
+		return fmt.Errorf("operator listener bind %s: %w", s.srv.Addr, err)
+	}
+	s.boundAddr.Store(ln.Addr().String())
+
+	if err := s.srv.Serve(ln); !errors.Is(err, http.ErrServerClosed) {
+		return fmt.Errorf("operator listener serve: %w", err)
+	}
+
+	return nil
+}
+
+// Addr returns the listener's bound address once Run has taken the
+// socket, or "" before that. Intended for tests that bind ":0".
+func (s *OperatorServer) Addr() string {
+	if v, ok := s.boundAddr.Load().(string); ok {
+		return v
+	}
+
+	return ""
+}
+
+// Shutdown gracefully drains the operator listener. Satisfies the
+// lifecycle package's HTTPServer contract; the drain sequence runs it
+// LAST so /readyz stays observable for the kubelet during the public
+// drain.
+func (s *OperatorServer) Shutdown(ctx context.Context) error {
+	if err := s.srv.Shutdown(ctx); err != nil {
+		return fmt.Errorf("operator listener shutdown: %w", err)
+	}
+
+	return nil
 }
 
 // liveHandler answers the K8s liveness probe. Returns 200 OK as long
@@ -214,9 +308,9 @@ func NewOperatorServer(
 // the request. Per K8s semantics, a liveness failure causes pod
 // restart — the gateway has no condition under which "process up but
 // dead" is meaningful, so the probe is unconditional.
-func liveHandler() app.HandlerFunc {
-	return func(_ context.Context, ctx *app.RequestContext) {
-		ctx.SetStatusCode(consts.StatusOK)
+func liveHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
 	}
 }
 
@@ -230,12 +324,12 @@ func liveHandler() app.HandlerFunc {
 //
 // A nil ReadinessSignal degrades to "always ready"; tests that build
 // the server without a real signal still get a working endpoint.
-func readyHandler(signal ReadinessSignal) app.HandlerFunc {
-	return func(_ context.Context, ctx *app.RequestContext) {
+func readyHandler(signal ReadinessSignal) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
 		if signal != nil && !signal.Ready() {
-			ctx.SetStatusCode(consts.StatusServiceUnavailable)
+			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
-		ctx.SetStatusCode(consts.StatusOK)
+		w.WriteHeader(http.StatusOK)
 	}
 }

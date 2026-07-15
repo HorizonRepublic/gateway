@@ -279,6 +279,11 @@ type Config struct {
 	//   - nats-kv — bucket MaxAge; keys are reaped after this duration
 	//               regardless of activity. Raise the value to preserve
 	//               state longer across traffic gaps.
+	//
+	// MUST be > 0; Load() rejects zero and negative values. Zero is
+	// NOT "disable expiry" for either backend — on the memory backend
+	// it would place the sweep cutoff at "now" and silently reset
+	// every bucket each sweeper tick.
 	RateLimitKeyTTL time.Duration `env:"RATELIMIT_KEY_TTL" envDefault:"10m"`
 
 	// RateLimitTimeout bounds the wall-clock budget the rate-limit
@@ -316,6 +321,14 @@ type Config struct {
 	// LogFormat is the log output encoding: "json" for production or
 	// "console" for human-friendly colored output in local dev.
 	LogFormat string `env:"LOG_FORMAT"         envDefault:"json"`
+	// AccessLogEnabled controls the per-request structured access-log
+	// event (event=http.access) emitted at INFO when a request
+	// completes. Enabled by default — operators debugging a
+	// production incident need the request trail without a config
+	// change and restart. Disable only when an edge already captures
+	// equivalent access logs and the duplicate volume is a cost
+	// problem; metrics are unaffected by this knob.
+	AccessLogEnabled bool `env:"ACCESS_LOG_ENABLED" envDefault:"true"`
 
 	// Environment is a free-form deployment-tier label ("production",
 	// "staging", "development", ...). The gateway treats "production"
@@ -397,6 +410,16 @@ func Load() (*Config, error) {
 
 	if cfg.RateLimitTimeout <= 0 || cfg.RateLimitTimeout > time.Second {
 		return nil, fmt.Errorf("RATELIMIT_TIMEOUT must be > 0 and ≤ 1s, got %s", cfg.RateLimitTimeout)
+	}
+
+	// A zero or negative TTL is never "disable expiry": the memory
+	// backend would compute its sweep cutoff at or beyond "now" and
+	// reap every bucket on every tick, silently resetting all keys to
+	// full burst each second — a fail-open with no log line. Rejecting
+	// at Load keeps both backends on the same contract and surfaces
+	// the misconfiguration at startup instead of in production traffic.
+	if cfg.RateLimitKeyTTL <= 0 {
+		return nil, fmt.Errorf("RATELIMIT_KEY_TTL must be > 0, got %s", cfg.RateLimitKeyTTL)
 	}
 
 	if cfg.RateLimitMemoryMaxEntries < 0 {

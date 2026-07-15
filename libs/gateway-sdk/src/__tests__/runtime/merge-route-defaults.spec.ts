@@ -17,7 +17,10 @@ describe(mergeRouteDefaults.name, () => {
 
       const merged = mergeRouteDefaults(defaults, { method: 'GET' });
 
-      expect(merged['cors']).toEqual({ origins: ['*'] });
+      expect(merged['cors']).toEqual({
+        origins: ['*'],
+        headers: ['Content-Type', 'Authorization', 'X-Request-Id'],
+      });
     });
 
     it('fills in rateLimit from defaults when the route has none', () => {
@@ -45,7 +48,10 @@ describe(mergeRouteDefaults.name, () => {
         cors: { origins: ['https://app.example.com'] },
       });
 
-      expect(merged['cors']).toEqual({ origins: ['https://app.example.com'] });
+      expect(merged['cors']).toEqual({
+        origins: ['https://app.example.com'],
+        headers: ['Content-Type', 'Authorization', 'X-Request-Id'],
+      });
     });
 
     it('keeps the route rateLimit and ignores defaults.rateLimit', () => {
@@ -94,6 +100,47 @@ describe(mergeRouteDefaults.name, () => {
       const merged = mergeRouteDefaults(defaults, {});
 
       expect(merged['headers']).toEqual({ 'cache-control': 'no-store' });
+    });
+  });
+
+  describe('cors — explicit headers default on the wire', () => {
+    it('writes the documented headers default into a route cors block that omits headers', () => {
+      const merged = mergeRouteDefaults({}, { cors: { origins: ['https://app.example.com'] } });
+
+      expect(merged['cors']).toEqual({
+        origins: ['https://app.example.com'],
+        headers: ['Content-Type', 'Authorization', 'X-Request-Id'],
+      });
+    });
+
+    it('keeps an explicit headers list untouched', () => {
+      const merged = mergeRouteDefaults(
+        {},
+        { cors: { origins: ['https://app.example.com'], headers: ['X-Custom'] } },
+      );
+
+      expect(merged['cors']).toEqual({
+        origins: ['https://app.example.com'],
+        headers: ['X-Custom'],
+      });
+    });
+
+    it('keeps an explicit empty headers list (opt-out of Access-Control-Allow-Headers)', () => {
+      const merged = mergeRouteDefaults(
+        {},
+        { cors: { origins: ['https://app.example.com'], headers: [] } },
+      );
+
+      expect(merged['cors']).toEqual({
+        origins: ['https://app.example.com'],
+        headers: [],
+      });
+    });
+
+    it('leaves the cors slot absent when neither side declares one', () => {
+      const merged = mergeRouteDefaults({}, { method: 'GET' });
+
+      expect('cors' in merged).toBe(false);
     });
   });
 
