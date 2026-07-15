@@ -75,12 +75,23 @@ func (f *fakeHTTPServer) Shutdown(ctx context.Context) error {
 }
 
 // fakeNATSConn captures Drain invocations for test assertions.
+//
+// It mirrors nats.go's real Drain semantics: Drain only INITIATES the
+// teardown and the connection reports closed separately via IsClosed.
+// By default a successful Drain flips closed immediately (a fast
+// drain); tests that exercise the async gap set neverCloses or flip
+// the closed flag themselves.
 type fakeNATSConn struct {
 	mu       sync.Mutex
 	called   bool
 	err      error
 	recorder *stepRecorder
 	order    int64
+	closed   atomic.Bool
+	// neverCloses, when true, keeps IsClosed reporting false after a
+	// successful Drain — simulating a background drain that never
+	// finishes (hung flush, dead socket). Used by the timeout tests.
+	neverCloses bool
 	// blockUntil, when non-nil, holds the goroutine inside Drain until
 	// the channel is closed or the receive races a return. Used by the
 	// drain-timeout test to simulate a hung NATS connection.
@@ -97,8 +108,13 @@ func (f *fakeNATSConn) Drain() error {
 	if f.recorder != nil {
 		f.order = f.recorder.next()
 	}
+	if f.err == nil && !f.neverCloses {
+		f.closed.Store(true)
+	}
 	return f.err
 }
+
+func (f *fakeNATSConn) IsClosed() bool { return f.closed.Load() }
 
 // recordingWatcher is a WatcherStopper used by every test that needs
 // a `WatcherStopper` value. The shared instance avoids depending on
@@ -378,6 +394,84 @@ func TestDrain_NATSDrainTimeoutDoesNotBlockShutdown(t *testing.T) {
 	// it — drain returned via the timeout branch but the worker is
 	// still parked on the channel send.
 	close(nats.blockUntil)
+}
+
+func TestDrain_NATSWaitsForBackgroundDrainCompletion(t *testing.T) {
+	// nats.go's Conn.Drain is asynchronous: it returns nil immediately
+	// while a background goroutine finishes the drain and closes the
+	// connection. The drain step must NOT treat that early return as
+	// completion — it has to wait until the connection actually
+	// reports closed. The fake returns from Drain instantly with the
+	// closed flag still false; a helper goroutine flips it after a
+	// delay, simulating the background drain finishing its work.
+	http := &fakeHTTPServer{}
+	nats := &fakeNATSConn{neverCloses: true}
+	watcher := &recordingWatcher{}
+
+	const backgroundDrainTime = 100 * time.Millisecond
+	go func() {
+		time.Sleep(backgroundDrainTime)
+		nats.closed.Store(true)
+	}()
+
+	var buf logCapture
+	logger := zerolog.New(&buf)
+
+	start := time.Now()
+	Drain(Options{
+		HTTP:    http,
+		Watcher: watcher,
+		NATS:    nats,
+		Timeout: 5 * time.Second,
+		Logger:  logger,
+	})
+	elapsed := time.Since(start)
+
+	assert.Contains(t, buf.String(), `"message":"shutdown step: nats drain complete"`,
+		"the step must report completion once the connection closes")
+	assert.GreaterOrEqual(t, elapsed, backgroundDrainTime,
+		"Drain must not return before the background drain closed the connection — "+
+			"an early return would let main exit and kill the socket mid-drain")
+}
+
+func TestDrain_NATSDrainInitiatedButNeverClosed_TimesOut(t *testing.T) {
+	// The real-world hung-drain shape: Drain() returns nil immediately
+	// (the initiation always succeeds) but the background drain never
+	// finishes — a wedged flush or a dead socket. The step must yield
+	// at the shared shutdown deadline instead of waiting forever, and
+	// must say so at WARN.
+	http := &fakeHTTPServer{}
+	nats := &fakeNATSConn{neverCloses: true}
+	watcher := &recordingWatcher{}
+
+	const timeout = 50 * time.Millisecond
+	const slack = 250 * time.Millisecond
+
+	var buf logCapture
+	logger := zerolog.New(&buf)
+
+	done := make(chan struct{})
+	go func() {
+		Drain(Options{
+			HTTP:    http,
+			Watcher: watcher,
+			NATS:    nats,
+			Timeout: timeout,
+			Logger:  logger,
+		})
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(timeout + slack):
+		t.Fatalf("Drain did not return within timeout+slack (%v)", timeout+slack)
+	}
+
+	assert.Contains(t, buf.String(), `"message":"nats drain timed out; forcing shutdown"`,
+		"an unfinished background drain must surface as a WARN, not as silent success")
+	assert.NotContains(t, buf.String(), `"message":"shutdown step: nats drain complete"`,
+		"the step must not claim completion for a connection that never closed")
 }
 
 func TestDrain_StopsWatcherIdempotently(t *testing.T) {
