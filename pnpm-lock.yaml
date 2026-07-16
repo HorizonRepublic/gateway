@@ -15,7 +15,7 @@ importers:
     dependencies:
       '@horizon-republic/nestjs-jetstream':
         specifier: ^2.10.0
-        version: 2.10.0(@nestjs/common@12.0.0-alpha.2(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@12.0.0-alpha.2)(@nestjs/microservices@12.0.0-alpha.2)(@opentelemetry/api@1.9.1)(reflect-metadata@0.2.2)(rxjs@7.8.2)
+        version: 2.13.0(@nestjs/common@12.0.0-alpha.2(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@12.0.0-alpha.2)(@nestjs/microservices@12.0.0-alpha.2)(@opentelemetry/api@1.9.1)(reflect-metadata@0.2.2)(rxjs@7.8.2)
       '@nestjs/common':
         specifier: 12.0.0-alpha.2
         version: 12.0.0-alpha.2(reflect-metadata@0.2.2)(rxjs@7.8.2)
@@ -24,7 +24,7 @@ importers:
         version: 12.0.0-alpha.2(@nestjs/common@12.0.0-alpha.2(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/microservices@12.0.0-alpha.2)(reflect-metadata@0.2.2)(rxjs@7.8.2)
       '@nestjs/microservices':
         specifier: 12.0.0-alpha.2
-        version: 12.0.0-alpha.2(@nats-io/transport-node@3.3.1)(@nestjs/common@12.0.0-alpha.2(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@12.0.0-alpha.2)(reflect-metadata@0.2.2)(rxjs@7.8.2)
+        version: 12.0.0-alpha.2(@nats-io/transport-node@3.4.0)(@nestjs/common@12.0.0-alpha.2(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@12.0.0-alpha.2)(reflect-metadata@0.2.2)(rxjs@7.8.2)
       '@nestjs/platform-fastify':
         specifier: 12.0.0-alpha.2
         version: 12.0.0-alpha.2(@nestjs/common@12.0.0-alpha.2(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@12.0.0-alpha.2)
@@ -971,8 +971,8 @@ packages:
   '@golevelup/ts-jest@3.0.0':
     resolution: {integrity: sha512-ei0cvUKrVv8cJBW6df54yeod8PyzR2LTYG6wJ1xm+213p7HnThw5ShQcRH0/hhhnXnJCLrpmJM7e6fkRjHUF1g==}
 
-  '@horizon-republic/nestjs-jetstream@2.10.0':
-    resolution: {integrity: sha512-4td1lrq303GQgOQ9J4U7CHLWYVavwm8W6O5OlYdj0qKzKGUy/V4varSBVbHZNNE4cyuwZ6ExlxCJdyLT9ml6fw==}
+  '@horizon-republic/nestjs-jetstream@2.13.0':
+    resolution: {integrity: sha512-qcXPBUm4Q62dSNJxxIqMa3eEuxBSUa9uxfIOgPRrvpdd4Tl7Jz6gFSQsN1EMkVGi4Zk1aHU52aNQSFNVSvLDiw==}
     engines: {node: '>= 20.0.0'}
     peerDependencies:
       '@nestjs/common': ^10.2.0 || ^11.0.0
@@ -980,12 +980,15 @@ packages:
       '@nestjs/microservices': ^10.2.0 || ^11.0.0
       '@opentelemetry/api': ^1.9.0
       msgpackr: ^1.11.0
+      prom-client: ^15.0.0
       reflect-metadata: ^0.2.0
       rxjs: ^7.8.0
     peerDependenciesMeta:
       '@opentelemetry/api':
         optional: true
       msgpackr:
+        optional: true
+      prom-client:
         optional: true
 
   '@humanfs/core@0.19.2':
@@ -1270,25 +1273,25 @@ packages:
   '@napi-rs/wasm-runtime@0.2.4':
     resolution: {integrity: sha512-9zESzOO5aDByvhIAsOy9TbpZ0Ur2AJbUI7UT73kcUTS2mxAMHOBaa1st/jAymNoCtvrit99kkzT1FZuXVcgfIQ==}
 
-  '@nats-io/jetstream@3.3.1':
-    resolution: {integrity: sha512-oTIxM47pQfv4zCMlLN7FtARxSclMlUUPPn9I3VxRwMH+N2jkj1WCApu+tSL778KuljxfG8txi/MPwoWSXqbbQQ==}
+  '@nats-io/jetstream@3.4.0':
+    resolution: {integrity: sha512-GzHQodNJ942+R5LRb8PuZ5ugVWVWMRiufxUYLLVWkXKfwDXYN+Owo0d7L/b9O7BPyrbYD7jQWAC6+ZVuXa9Gyw==}
 
-  '@nats-io/kv@3.3.1':
-    resolution: {integrity: sha512-KqFTRNxDFbeZ5rMG/2dOYVYRujd6gzSfDm0Eo9r5GMbSDT7waNzD6Hz9hOqXwBL7/72F/fJ7+NfPVD9KWq37ew==}
+  '@nats-io/kv@3.4.0':
+    resolution: {integrity: sha512-168pcRJxWcIRHwdyczI3DaGk5r3CAj3CyKXuk4Nmx5KKj7N1znQOJPIxCoV0TPlAvoTidVb7eBv41J9imapMeQ==}
 
-  '@nats-io/nats-core@3.3.1':
-    resolution: {integrity: sha512-myFXGTo4cCfKrsLDjkoEz7FjjjvSfBRjun7Qx3n3Z5OzW4JUY8Ou7VQsGAdXLQxHN3ae/XNXvmXxshDoFPex4w==}
+  '@nats-io/nats-core@3.4.0':
+    resolution: {integrity: sha512-QMDM86EUNm+wudlKC67HLar/KHHQUvJGLfb4jbahje3pUk3K9afeck9fwsxBZF0eUFox6T/TA6m/t+lQqf+QsQ==}
 
   '@nats-io/nkeys@2.0.3':
     resolution: {integrity: sha512-JVt56GuE6Z89KUkI4TXUbSI9fmIfAmk6PMPknijmuL72GcD+UgIomTcRWiNvvJKxA01sBbmIPStqJs5cMRBC3A==}
     engines: {node: '>=18.0.0'}
 
-  '@nats-io/nuid@2.0.3':
-    resolution: {integrity: sha512-TpA3HEBna/qMVudy+3HZr5M3mo/L1JPofpVT4t0HkFGkz2Cn9wrlrQC8tvR8Md5Oa9//GtGG26eN0qEWF5Vqew==}
-    engines: {node: '>= 18.x'}
+  '@nats-io/nuid@3.0.0':
+    resolution: {integrity: sha512-QbXZDrxmYlrn5AD06gYcUTmEHwxn96HBQMIk7XTjDlEcx6FPzVBBPjp4AMRh1lEv6B4iJ6Xb/Uz61JugPXFRQg==}
+    engines: {node: '>= 22.x'}
 
-  '@nats-io/transport-node@3.3.1':
-    resolution: {integrity: sha512-GBvY0VcvyQEILgy5bjpqU1GpDYmSF06bW59I7cewZuNGS9u3AoV/gf+a+3ep45T/Z+UC661atq/b7x+QV12w+Q==}
+  '@nats-io/transport-node@3.4.0':
+    resolution: {integrity: sha512-hH7u7ejIBTFEJIZ8rIcMrHJI6wl+HhpO5sVFs1+ppmXa8RuB2+Lh1+UwTzZ5xTNNm1TKcRkYy+2qCV56qp8RxA==}
     engines: {node: '>= 18.0.0'}
 
   '@nestjs/common@12.0.0-alpha.2':
@@ -6713,15 +6716,15 @@ snapshots:
 
   '@golevelup/ts-jest@3.0.0': {}
 
-  '@horizon-republic/nestjs-jetstream@2.10.0(@nestjs/common@12.0.0-alpha.2(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@12.0.0-alpha.2)(@nestjs/microservices@12.0.0-alpha.2)(@opentelemetry/api@1.9.1)(reflect-metadata@0.2.2)(rxjs@7.8.2)':
+  '@horizon-republic/nestjs-jetstream@2.13.0(@nestjs/common@12.0.0-alpha.2(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@12.0.0-alpha.2)(@nestjs/microservices@12.0.0-alpha.2)(@opentelemetry/api@1.9.1)(reflect-metadata@0.2.2)(rxjs@7.8.2)':
     dependencies:
-      '@nats-io/jetstream': 3.3.1
-      '@nats-io/kv': 3.3.1
-      '@nats-io/nuid': 2.0.3
-      '@nats-io/transport-node': 3.3.1
+      '@nats-io/jetstream': 3.4.0
+      '@nats-io/kv': 3.4.0
+      '@nats-io/nuid': 3.0.0
+      '@nats-io/transport-node': 3.4.0
       '@nestjs/common': 12.0.0-alpha.2(reflect-metadata@0.2.2)(rxjs@7.8.2)
       '@nestjs/core': 12.0.0-alpha.2(@nestjs/common@12.0.0-alpha.2(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/microservices@12.0.0-alpha.2)(reflect-metadata@0.2.2)(rxjs@7.8.2)
-      '@nestjs/microservices': 12.0.0-alpha.2(@nats-io/transport-node@3.3.1)(@nestjs/common@12.0.0-alpha.2(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@12.0.0-alpha.2)(reflect-metadata@0.2.2)(rxjs@7.8.2)
+      '@nestjs/microservices': 12.0.0-alpha.2(@nats-io/transport-node@3.4.0)(@nestjs/common@12.0.0-alpha.2(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@12.0.0-alpha.2)(reflect-metadata@0.2.2)(rxjs@7.8.2)
       reflect-metadata: 0.2.2
       rxjs: 7.8.2
     optionalDependencies:
@@ -7116,31 +7119,31 @@ snapshots:
       '@emnapi/runtime': 1.10.0
       '@tybys/wasm-util': 0.9.0
 
-  '@nats-io/jetstream@3.3.1':
+  '@nats-io/jetstream@3.4.0':
     dependencies:
-      '@nats-io/nats-core': 3.3.1
+      '@nats-io/nats-core': 3.4.0
 
-  '@nats-io/kv@3.3.1':
+  '@nats-io/kv@3.4.0':
     dependencies:
-      '@nats-io/jetstream': 3.3.1
-      '@nats-io/nats-core': 3.3.1
+      '@nats-io/jetstream': 3.4.0
+      '@nats-io/nats-core': 3.4.0
 
-  '@nats-io/nats-core@3.3.1':
+  '@nats-io/nats-core@3.4.0':
     dependencies:
       '@nats-io/nkeys': 2.0.3
-      '@nats-io/nuid': 2.0.3
+      '@nats-io/nuid': 3.0.0
 
   '@nats-io/nkeys@2.0.3':
     dependencies:
       tweetnacl: 1.0.3
 
-  '@nats-io/nuid@2.0.3': {}
+  '@nats-io/nuid@3.0.0': {}
 
-  '@nats-io/transport-node@3.3.1':
+  '@nats-io/transport-node@3.4.0':
     dependencies:
-      '@nats-io/nats-core': 3.3.1
+      '@nats-io/nats-core': 3.4.0
       '@nats-io/nkeys': 2.0.3
-      '@nats-io/nuid': 2.0.3
+      '@nats-io/nuid': 3.0.0
 
   '@nestjs/common@12.0.0-alpha.2(reflect-metadata@0.2.2)(rxjs@7.8.2)':
     dependencies:
@@ -7166,9 +7169,9 @@ snapshots:
       tslib: 2.8.1
       uid: 2.0.2
     optionalDependencies:
-      '@nestjs/microservices': 12.0.0-alpha.2(@nats-io/transport-node@3.3.1)(@nestjs/common@12.0.0-alpha.2(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@12.0.0-alpha.2)(reflect-metadata@0.2.2)(rxjs@7.8.2)
+      '@nestjs/microservices': 12.0.0-alpha.2(@nats-io/transport-node@3.4.0)(@nestjs/common@12.0.0-alpha.2(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@12.0.0-alpha.2)(reflect-metadata@0.2.2)(rxjs@7.8.2)
 
-  '@nestjs/microservices@12.0.0-alpha.2(@nats-io/transport-node@3.3.1)(@nestjs/common@12.0.0-alpha.2(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@12.0.0-alpha.2)(reflect-metadata@0.2.2)(rxjs@7.8.2)':
+  '@nestjs/microservices@12.0.0-alpha.2(@nats-io/transport-node@3.4.0)(@nestjs/common@12.0.0-alpha.2(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@12.0.0-alpha.2)(reflect-metadata@0.2.2)(rxjs@7.8.2)':
     dependencies:
       '@nestjs/common': 12.0.0-alpha.2(reflect-metadata@0.2.2)(rxjs@7.8.2)
       '@nestjs/core': 12.0.0-alpha.2(@nestjs/common@12.0.0-alpha.2(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/microservices@12.0.0-alpha.2)(reflect-metadata@0.2.2)(rxjs@7.8.2)
@@ -7177,7 +7180,7 @@ snapshots:
       rxjs: 7.8.2
       tslib: 2.8.1
     optionalDependencies:
-      '@nats-io/transport-node': 3.3.1
+      '@nats-io/transport-node': 3.4.0
 
   '@nestjs/platform-fastify@12.0.0-alpha.2(@nestjs/common@12.0.0-alpha.2(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@12.0.0-alpha.2)':
     dependencies:
@@ -7200,7 +7203,7 @@ snapshots:
       '@nestjs/core': 12.0.0-alpha.2(@nestjs/common@12.0.0-alpha.2(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/microservices@12.0.0-alpha.2)(reflect-metadata@0.2.2)(rxjs@7.8.2)
       tslib: 2.8.1
     optionalDependencies:
-      '@nestjs/microservices': 12.0.0-alpha.2(@nats-io/transport-node@3.3.1)(@nestjs/common@12.0.0-alpha.2(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@12.0.0-alpha.2)(reflect-metadata@0.2.2)(rxjs@7.8.2)
+      '@nestjs/microservices': 12.0.0-alpha.2(@nats-io/transport-node@3.4.0)(@nestjs/common@12.0.0-alpha.2(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@12.0.0-alpha.2)(reflect-metadata@0.2.2)(rxjs@7.8.2)
 
   '@noble/hashes@1.4.0': {}
 
